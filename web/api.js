@@ -1,0 +1,81 @@
+(function (global) {
+  var DEFAULT_BASE = "http://127.0.0.1:53319";
+
+  function originBase() {
+    if (global.location && (global.location.protocol === "http:" || global.location.protocol === "https:")) {
+      return global.location.origin;
+    }
+    return DEFAULT_BASE;
+  }
+
+  var api = {
+    base: originBase(),
+
+    setBase: function (url) {
+      this.base = String(url || DEFAULT_BASE).replace(/\/$/, "");
+    },
+
+    request: function (method, path, body, headers) {
+      return fetch(this.base + path, {
+        method: method,
+        body: body || undefined,
+        headers: headers || undefined,
+      }).then(function (res) {
+        return res.text().then(function (text) {
+          var data = null;
+          if (text) {
+            try {
+              data = JSON.parse(text);
+            } catch (e) {
+              data = { error: text };
+            }
+          }
+          if (!res.ok) {
+            var err = new Error((data && data.error) || "请求失败");
+            err.status = res.status;
+            throw err;
+          }
+          return data;
+        });
+      });
+    },
+
+    info: function () {
+      return this.request("GET", "/api/v1/info");
+    },
+
+    albums: function () {
+      return this.request("GET", "/api/v1/albums");
+    },
+
+    photos: function (album) {
+      return this.request("GET", "/api/v1/albums/" + encodeURIComponent(album) + "/photos");
+    },
+
+    thumbUrl: function (id) {
+      return this.base + "/api/v1/photos/" + encodeURIComponent(id) + "/thumb";
+    },
+
+    upload: function (album, file, mode) {
+      var query = new URLSearchParams();
+      query.set("name", file.name || "photo.jpg");
+      query.set("mime", file.type || "image/jpeg");
+      query.set("mode", mode === "replace" ? "replace" : "append");
+      if (file.lastModified > 0) query.set("takenMs", String(file.lastModified));
+      var path = "/api/v1/albums/" + encodeURIComponent(album) + "/upload?" + query.toString();
+      return this.request("POST", path, file, {
+        "Content-Type": file.type || "application/octet-stream",
+      });
+    },
+
+    deletePhoto: function (id) {
+      return this.request("DELETE", "/api/v1/photos/" + encodeURIComponent(id));
+    },
+
+    deleteAlbum: function (album) {
+      return this.request("DELETE", "/api/v1/albums/" + encodeURIComponent(album));
+    },
+  };
+
+  global.AvesApi = api;
+})(window);

@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.AvesTvReceiver" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">#0B1220</item>
+        <item name="colorPrimary">#38BDF8</item>
+        <item name="colorSurface">#111827</item>
+    </style>
+</resources>

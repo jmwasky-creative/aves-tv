@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>电视相册接收器</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body class="tv">
+  <main class="stage">
+    <header class="top">
+      <h1>电视相册接收器</h1>
+      <p id="badge" class="badge">启动中...</p>
+    </header>
+    <section class="panel">
+      <p id="deviceName" class="stat">电视名称：客厅电视</p>
+      <p id="stats" class="stat">已收相册：0 个 · 照片：0 张 · 可用空间：--</p>
+      <p id="network" class="stat">局域网地址（手机自动搜，无需手动填）：正在读取</p>
+      <p id="event" class="stat">最新动态：等待手机推送</p>
+    </section>
+    <div class="actions">
+      <button id="openAves" type="button">打开原版 Aves 播放</button>
+      <button id="rename" type="button">修改电视名称</button>
+      <button id="autoStart" type="button">开机自启：已开启</button>
+    </div>
+  </main>
+  <script src="api.js"></script>
+  <script>
+    (function () {
+      var native = typeof AvesTvNative !== "undefined" ? AvesTvNative : null;
+      var previewEvent = localStorage.getItem("avestv.lastEvent") || "等待手机推送";
+      var seen = null;
+      var holdEvent = "";
+      var deviceNameEl = document.getElementById("deviceName");
+      var currentName = "客厅电视";
+
+      function formatBytes(n) {
+        if (!n || n <= 0) return "--";
+        var units = ["B", "KB", "MB", "GB", "TB"];
+        var value = n;
+        var i = 0;
+        while (value >= 1024 && i < units.length - 1) {
+          value /= 1024;
+          i++;
+        }
+        var digits = value >= 10 || i === 0 ? 0 : 1;
+        return value.toFixed(digits) + " " + units[i];
+      }
+
+      function stamp() {
+        var d = new Date();
+        function p(n) { return String(n).padStart(2, "0"); }
+        return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+      }
+
+      function render(state) {
+        currentName = state.deviceName || "客厅电视";
+        var badge = document.getElementById("badge");
+        badge.textContent = state.statusText || (state.running ? "运行中 · 自动可发现" : "未运行");
+        badge.className = state.running ? "badge" : "badge off";
+        deviceNameEl.textContent = "电视名称：" + currentName;
+        var freeLabel = state.freeLabel || formatBytes(state.freeBytes);
+        document.getElementById("stats").textContent =
+          "已收相册：" + (state.albumCount || 0) + " 个 · 照片：" + (state.totalPhotos || 0) + " 张 · 可用空间：" + freeLabel;
+        document.getElementById("network").textContent =
+          "局域网地址（手机自动搜，无需手动填）：" + (state.ipText || "未检测到局域网连接（请确认电视已连 Wi-Fi 或网线）");
+        document.getElementById("event").textContent = "最新动态：" + (holdEvent || state.lastEvent || "等待手机推送");
+        document.getElementById("autoStart").textContent = state.autoStart ? "开机自启：已开启" : "开机自启：已关闭";
+      }
+
+      function refresh() {
+        if (native) {
+          render(JSON.parse(native.runtimeJson()));
+          return;
+        }
+        var storedName = localStorage.getItem("avestv.deviceName");
+        var auto = localStorage.getItem("avestv.autoStart") !== "0";
+        AvesApi.info().then(function (info) {
+          if (seen && (seen.albumCount !== info.albumCount || seen.totalPhotos !== info.totalPhotos)) {
+            previewEvent = "刚收到手机相册更新 (" + stamp() + ")";
+            localStorage.setItem("avestv.lastEvent", previewEvent);
+          }
+          seen = { albumCount: info.albumCount, totalPhotos: info.totalPhotos };
+          var host = location.host || ("127.0.0.1:" + (info.httpPort || 53319));
+          render({
+            running: true,
+            statusText: "运行中 · 自动可发现",
+            deviceName: storedName || info.deviceName,
+            albumCount: info.albumCount,
+            totalPhotos: info.totalPhotos,
+            freeLabel: formatBytes(info.freeBytes),
+            ipText: host,
+            lastEvent: previewEvent,
+            autoStart: auto,
+          });
+        }).catch(function () {
+          render({
+            running: false,
+            statusText: "未运行",
+            deviceName: storedName || "客厅电视",
+            albumCount: 0,
+            totalPhotos: 0,
+            freeLabel: "--",
+            ipText: "未检测到局域网连接（请确认电视已连 Wi-Fi 或网线）",
+            lastEvent: "预览服务未启动",
+            autoStart: auto,
+          });
+        });
+      }
+
+      document.getElementById("openAves").addEventListener("click", function () {
+        if (native) {
+          var msg = native.openAves();
+          if (msg) {
+            holdEvent = msg;
+            refresh();
+          }
+          return;
+        }
+        previewEvent = "浏览器预览不会启动 Aves";
+        localStorage.setItem("avestv.lastEvent", previewEvent);
+        refresh();
+      });
+
+      document.getElementById("rename").addEventListener("click", function () {
+        var next = window.prompt("修改电视名称", currentName);
+        if (next == null) return;
+        var clean = next.trim().slice(0, 40) || "客厅电视";
+        if (native) native.rename(clean);
+        else localStorage.setItem("avestv.deviceName", clean);
+        refresh();
+      });
+
+      document.getElementById("autoStart").addEventListener("click", function () {
+        if (native) {
+          native.setAutoStart(!native.autoStartEnabled());
+        } else {
+          var on = localStorage.getItem("avestv.autoStart") !== "0";
+          localStorage.setItem("avestv.autoStart", on ? "0" : "1");
+        }
+        refresh();
+      });
+
+      window.avesFocus = function () {
+        document.getElementById("openAves").focus();
+      };
+
+      refresh();
+      setInterval(refresh, 1500);
+      if (!native) document.getElementById("openAves").focus();
+    })();
+  </script>
+</body>
+</html>

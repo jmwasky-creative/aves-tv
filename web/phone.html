@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>电视相册推送</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body class="phone">
+  <main class="shell">
+    <header>
+      <h1>电视相册推送</h1>
+      <p class="lede">自动发现局域网电视并直推照片，电视端原版 Aves 自动同步播放</p>
+    </header>
+
+    <section class="card" aria-label="连接">
+      <div class="row">
+        <h2 id="connTitle">正在自动搜索局域网电视...</h2>
+        <button id="rescan" class="text" type="button">重新搜索</button>
+      </div>
+      <p id="connDetail" class="muted">无需填 IP，正在并发探测局域网内的电视相册接收器</p>
+      <button id="switchTv" class="text" type="button" hidden>切换电视</button>
+      <div id="tvList" class="tv-list" hidden></div>
+    </section>
+
+    <section id="shareBanner" class="banner" hidden>
+      <strong id="shareText">已从系统相册收到 0 张待推送照片</strong>
+      <button id="clearShare" class="text" type="button">取消</button>
+    </section>
+
+    <section class="card" aria-label="推送">
+      <h2>推送目标相册</h2>
+      <div id="chips" class="chips" style="margin-top:8px"></div>
+      <div class="stack">
+        <label class="field">
+          <span>相册文件夹名（如：家庭相册、妈妈的夏天）</span>
+          <input id="albumName" type="text" value="家庭相册" autocomplete="off">
+        </label>
+        <div class="choices">
+          <label><input id="modeAppend" type="radio" name="mode" value="append" checked>追加照片（同名覆盖）</label>
+          <label><input id="modeReplace" type="radio" name="mode" value="replace">替换整本相册</label>
+        </div>
+        <label class="switch">
+          <input id="optimize" type="checkbox" checked>
+          <span>电视 4K 兼容优化（自动转 JPEG 并扶正方向）</span>
+        </label>
+        <button id="push" class="primary" type="button" disabled>选择照片并推送到电视</button>
+        <progress id="progress" max="1" value="0" hidden></progress>
+        <p id="status" class="status" hidden></p>
+      </div>
+      <input id="files" type="file" accept="image/*" multiple hidden>
+    </section>
+
+    <section aria-label="电视相册">
+      <div class="section-head">
+        <h2 id="albumHeader" class="grow">电视端已有照片</h2>
+        <button id="clearAlbum" class="danger" type="button" hidden>清空此相册</button>
+      </div>
+      <p id="empty" class="muted">该相册暂无照片，点上方按钮推送后电视上的 Aves 会立即显示。</p>
+      <div id="grid" class="grid"></div>
+    </section>
+  </main>
+  <script src="api.js"></script>
+  <script>
+    (function () {
+      var native = typeof AvesTvNative !== "undefined" ? AvesTvNative : null;
+      var tvs = [];
+      var selected = null;
+      var connected = false;
+      var uploading = false;
+      var scanning = false;
+      var sharedCount = 0;
+      var listOpen = false;
+      var followPreferred = true;
+
+      var connTitle = document.getElementById("connTitle");
+      var connDetail = document.getElementById("connDetail");
+      var rescan = document.getElementById("rescan");
+      var switchTv = document.getElementById("switchTv");
+      var tvList = document.getElementById("tvList");
+      var shareBanner = document.getElementById("shareBanner");
+      var shareText = document.getElementById("shareText");
+      var chips = document.getElementById("chips");
+      var albumInput = document.getElementById("albumName");
+      var push = document.getElementById("push");
+      var progress = document.getElementById("progress");
+      var status = document.getElementById("status");
+      var files = document.getElementById("files");
+      var albumHeader = document.getElementById("albumHeader");
+      var clearAlbum = document.getElementById("clearAlbum");
+      var empty = document.getElementById("empty");
+      var grid = document.getElementById("grid");
+
+      function formatBytes(n) {
+        if (!n || n <= 0) return "--";
+        var units = ["B", "KB", "MB", "GB", "TB"];
+        var value = n;
+        var i = 0;
+        while (value >= 1024 && i < units.length - 1) {
+          value /= 1024;
+          i++;
+        }
+        var digits = value >= 10 || i === 0 ? 0 : 1;
+        return value.toFixed(digits) + " " + units[i];
+      }
+
+      function albumName() {
+        var name = albumInput.value.trim();
+        return name || "家庭相册";
+      }
+
+      function replaceMode() {
+        return document.getElementById("modeReplace").checked;
+      }
+
+      function optimizeOn() {
+        return document.getElementById("optimize").checked;
+      }
+
+      function setStatus(text) {
+        status.hidden = !text;
+        status.textContent = text || "";
+      }
+
+      function setShared(count) {
+        sharedCount = count > 0 ? count : 0;
+        shareBanner.hidden = sharedCount === 0;
+        shareText.textContent = "已从系统相册收到 " + sharedCount + " 张待推送照片";
+        push.textContent = sharedCount > 0
+          ? "立即推送这 " + sharedCount + " 张到电视"
+          : "选择照片并推送到电视";
+      }
+
+      function updatePushEnabled() {
+        push.disabled = !connected || uploading;
+      }
+
+      function showSearching() {
+        scanning = true;
+        rescan.disabled = true;
+        connTitle.textContent = "正在自动搜索局域网电视...";
+        connDetail.textContent = "无需填 IP，正在并发探测局域网内的电视相册接收器";
+        switchTv.hidden = true;
+        tvList.hidden = true;
+        updatePushEnabled();
+      }
+
+      function showMissing() {
+        scanning = false;
+        connected = false;
+        selected = null;
+        rescan.disabled = false;
+        connTitle.textContent = "未发现局域网内的电视";
+        connDetail.textContent = "请确认手机与电视连在同一个 Wi-Fi，且电视已安装并打开一次「电视相册接收器」";
+        switchTv.hidden = true;
+        tvList.hidden = true;
+        chips.textContent = "";
+        grid.textContent = "";
+        albumHeader.textContent = "电视端已有照片";
+        clearAlbum.hidden = true;
+        empty.hidden = false;
+        updatePushEnabled();
+      }
+
+      function renderSwitch() {
+        if (tvs.length > 1) {
+          switchTv.hidden = false;
+          switchTv.textContent = "切换电视（已发现 " + tvs.length + " 台）";
+        } else {
+          switchTv.hidden = true;
+          tvList.hidden = true;
+          listOpen = false;
+        }
+      }
+
+      function selectTv(tv, refresh) {
+        var changedTv = !selected || selected.deviceId !== tv.deviceId;
+        selected = tv;
+        connected = true;
+        AvesApi.setBase("http://" + tv.ip + ":" + tv.httpPort);
+        if (native && changedTv) native.remember(tv.deviceId);
+        var freeText = formatBytes(tv.freeBytes);
+        connTitle.textContent = "已自动连接：" + tv.deviceName;
+        connDetail.textContent = tv.discoverySource + " · 相册 " + tv.albumCount + " 个 · 照片 " + tv.totalPhotos + " 张 · 剩余 " + freeText;
+        renderSwitch();
+        updatePushEnabled();
+        if (refresh !== false) refreshAlbums();
+      }
+
+      function renderTvList() {
+        tvList.textContent = "";
+        tvs.forEach(function (tv) {
+          var button = document.createElement("button");
+          button.type = "button";
+          button.textContent = tv.deviceName + " (" + tv.ip + ")";
+          button.addEventListener("click", function () {
+            followPreferred = false;
+            listOpen = false;
+            tvList.hidden = true;
+            selectTv(tv, true);
+          });
+          tvList.appendChild(button);
+        });
+      }
+
+      function renderChips(albums) {
+        var current = albumName();
+        chips.textContent = "";
+        albums.forEach(function (album) {
+          var button = document.createElement("button");
+          button.type = "button";
+          button.className = "chip";
+          button.textContent = album.name + " (" + album.photoCount + ")";
+          button.setAttribute("aria-pressed", album.name === current ? "true" : "false");
+          button.addEventListener("click", function () {
+            albumInput.value = album.name;
+            renderChips(albums);
+            loadPhotos();
+          });
+          chips.appendChild(button);
+        });
+      }
+
+      function renderPhotos(photos) {
+        var name = albumName();
+        albumHeader.textContent = "电视相册「" + name + "」（" + photos.length + " 张）";
+        clearAlbum.hidden = photos.length === 0;
+        empty.hidden = photos.length !== 0;
+        grid.textContent = "";
+        photos.forEach(function (photo) {
+          var card = document.createElement("article");
+          card.className = "thumb";
+          var img = document.createElement("img");
+          img.alt = photo.name;
+          img.src = AvesApi.thumbUrl(photo.id);
+          var button = document.createElement("button");
+          button.type = "button";
+          button.textContent = "删除";
+          button.addEventListener("click", function () {
+            confirmDelete(photo);
+          });
+          card.appendChild(img);
+          card.appendChild(button);
+          grid.appendChild(card);
+        });
+      }
+
+      function refreshAlbums() {
+        if (!connected) return;
+        AvesApi.info().then(function (info) {
+          if (!selected) return;
+          selected.albumCount = info.albumCount || 0;
+          selected.totalPhotos = info.totalPhotos || 0;
+          if (info.freeBytes) selected.freeBytes = info.freeBytes;
+          connDetail.textContent = selected.discoverySource
+            + " · 相册 " + selected.albumCount
+            + " 个 · 照片 " + selected.totalPhotos
+            + " 张 · 剩余 " + formatBytes(selected.freeBytes);
+        }).catch(function () {});
+        AvesApi.albums().then(function (albums) {
+          renderChips(albums || []);
+          return loadPhotos();
+        }).catch(function () {
+          renderChips([]);
+          renderPhotos([]);
+        });
+      }
+
+      function loadPhotos() {
+        if (!connected) return Promise.resolve();
+        return AvesApi.photos(albumName()).then(function (photos) {
+          renderPhotos(photos || []);
+        }).catch(function () {
+          renderPhotos([]);
+        });
+      }
+
+      function applyScan(data) {
+        tvs = data.tvs || [];
+        if (!tvs.length) {
+          if (data.done) showMissing();
+          return;
+        }
+        scanning = !data.done;
+        rescan.disabled = !data.done;
+        var preferred = tvs.filter(function (tv) { return tv.deviceId === data.preferredId; })[0];
+        var current = selected && tvs.filter(function (tv) { return tv.deviceId === selected.deviceId; })[0];
+        var pick = (!followPreferred && current) ? current : (preferred || current || tvs[0]);
+        var changed = !selected || selected.deviceId !== pick.deviceId;
+        selectTv(pick, changed || data.done);
+        renderTvList();
+        updatePushEnabled();
+      }
+
+      window.avesOnScan = function (raw) {
+        var data = typeof raw === "string" ? JSON.parse(raw) : raw;
+        applyScan(data);
+      };
+
+      window.avesOnShared = function (count) {
+        setShared(Number(count) || 0);
+      };
+
+      window.avesOnUpload = function (raw) {
+        var ev = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (ev.phase === "start") {
+          uploading = true;
+          progress.hidden = false;
+          progress.max = ev.total || 1;
+          progress.value = 0;
+          updatePushEnabled();
+        }
+        if (ev.phase === "progress") progress.value = ev.index || 0;
+        if (ev.message) setStatus(ev.message);
+        if (ev.phase === "done") {
+          uploading = false;
+          progress.hidden = true;
+          if (ev.sharedCleared) setShared(0);
+          updatePushEnabled();
+          refreshAlbums();
+        }
+      };
+
+      function previewScan() {
+        showSearching();
+        AvesApi.setBase(AvesApi.base || "http://127.0.0.1:53319");
+        AvesApi.info().then(function (info) {
+          var port = info.httpPort || 53319;
+          var host = "127.0.0.1";
+          if (location.protocol === "http:" || location.protocol === "https:") {
+            host = location.hostname || host;
+            port = Number(location.port || port);
+          }
+          applyScan({
+            done: true,
+            preferredId: info.deviceId,
+            tvs: [{
+              deviceId: info.deviceId,
+              deviceName: info.deviceName,
+              ip: host,
+              httpPort: port,
+              discoverySource: "本机预览",
+              freeBytes: info.freeBytes || 0,
+              albumCount: info.albumCount || 0,
+              totalPhotos: info.totalPhotos || 0,
+            }],
+          });
+        }).catch(function () {
+          showMissing();
+        });
+      }
+
+      function startScan(force) {
+        if (native) {
+          showSearching();
+          native.requestScan(!!force);
+        } else {
+          previewScan();
+        }
+      }
+
+      function finishBrowserUpload(ok, fail, album, lastError) {
+        uploading = false;
+        progress.hidden = true;
+        updatePushEnabled();
+        if (fail === 0) {
+          var note = native ? "" : "浏览器预览按原文件写入。";
+          setStatus("推送完成：已写入 " + ok + " 张到电视「" + album + "」，原版 Aves 已自动更新" + (note ? " " + note : ""));
+        } else {
+          setStatus("推送完成：成功 " + ok + " 张，失败 " + fail + " 张（" + (lastError || "网络中断") + "）");
+        }
+        refreshAlbums();
+      }
+
+      function uploadFiles(list) {
+        var album = albumName();
+        var replace = replaceMode();
+        uploading = true;
+        updatePushEnabled();
+        progress.hidden = false;
+        progress.max = list.length;
+        progress.value = 0;
+        setStatus("准备推送 " + list.length + " 张照片到「" + album + "」...");
+        var ok = 0;
+        var fail = 0;
+        var lastError = "";
+        var chain = Promise.resolve();
+        list.forEach(function (file, index) {
+          chain = chain.then(function () {
+            setStatus("正在推送 " + (index + 1) + " / " + list.length + "...");
+            var mode = replace && index === 0 ? "replace" : "append";
+            return AvesApi.upload(album, file, mode).then(function () {
+              ok++;
+            }).catch(function (err) {
+              fail++;
+              lastError = err.message;
+            }).then(function () {
+              progress.value = index + 1;
+            });
+          });
+        });
+        chain.then(function () {
+          finishBrowserUpload(ok, fail, album, lastError);
+        });
+      }
+
+      function confirmDelete(photo) {
+        var message = "从电视删除这张照片？删除 " + photo.name + " 后，电视上的 Aves 会同步移除，不影响手机原图。";
+        if (!window.confirm(message)) return;
+        AvesApi.deletePhoto(photo.id).then(function () {
+          refreshAlbums();
+        }).catch(function () {
+          setStatus("删除失败，请重试");
+        });
+      }
+
+      rescan.addEventListener("click", function () {
+        followPreferred = true;
+        startScan(true);
+      });
+      switchTv.addEventListener("click", function () {
+        listOpen = !listOpen;
+        tvList.hidden = !listOpen;
+        if (listOpen) renderTvList();
+      });
+      document.getElementById("clearShare").addEventListener("click", function () {
+        if (native) native.clearShared();
+        setShared(0);
+      });
+      albumInput.addEventListener("change", function () {
+        renderChips([]);
+        refreshAlbums();
+      });
+      push.addEventListener("click", function () {
+        if (!connected) {
+          setStatus("尚未连接到电视，请先确认电视与手机在同一局域网");
+          return;
+        }
+        var album = albumName();
+        var replace = replaceMode();
+        var optimize = optimizeOn();
+        if (native) {
+          if (sharedCount > 0) native.uploadShared(album, replace, optimize);
+          else native.pickAndUpload(album, replace, optimize);
+          return;
+        }
+        files.click();
+      });
+      files.addEventListener("change", function () {
+        var list = Array.prototype.slice.call(files.files || []);
+        files.value = "";
+        if (list.length) uploadFiles(list);
+      });
+      clearAlbum.addEventListener("click", function () {
+        var album = albumName();
+        var message = "清空电视相册「" + album + "」？会删除电视端该相册下的所有照片，不影响手机里的原图。";
+        if (!window.confirm(message)) return;
+        AvesApi.deleteAlbum(album).then(function (result) {
+          var deleted = result && typeof result.deletedCount === "number" ? result.deletedCount : 0;
+          setStatus("已从电视清空 " + deleted + " 张照片");
+          refreshAlbums();
+        }).catch(function () {
+          setStatus("清空失败，请检查电视连接");
+        });
+      });
+
+      if (native) setShared(native.sharedCount());
+      startScan(false);
+    })();
+  </script>
+</body>
+</html>

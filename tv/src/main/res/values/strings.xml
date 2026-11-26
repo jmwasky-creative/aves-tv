@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">电视相册接收器</string>
+    <string name="notif_channel_name">电视相册后台接收服务</string>
+    <string name="notif_channel_desc">保持局域网照片接收服务在后台运行，方便手机直推照片到电视相册</string>
+    <string name="notif_title">电视相册接收服务运行中</string>
+    <string name="notif_text">手机打开发送端即可自动发现本电视并推送照片</string>
+</resources>

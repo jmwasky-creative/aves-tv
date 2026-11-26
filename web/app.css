@@ -1,0 +1,396 @@
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
+}
+
+button,
+input,
+label {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.phone {
+  --bg: #f8fafc;
+  --card: #ffffff;
+  --text: #0f172a;
+  --muted: #64748b;
+  --line: #e2e8f0;
+  --primary: #0284c7;
+  --primary-ink: #ffffff;
+  --danger: #dc2626;
+  --banner: #e0f2fe;
+  --banner-ink: #0369a1;
+  --chip: #f0f9ff;
+  --chip-line: #bae6fd;
+  background: var(--bg);
+  color: var(--text);
+  font-size: clamp(14px, 2.6vw, 16px);
+}
+
+@media (prefers-color-scheme: dark) {
+  .phone {
+    color-scheme: dark;
+    --bg: #0b1220;
+    --card: #111c33;
+    --text: #f8fafc;
+    --muted: #94a3b8;
+    --line: #334155;
+    --chip: #0f2744;
+    --chip-line: #1d4e89;
+  }
+}
+
+.phone .shell {
+  width: min(720px, 100%);
+  margin: 0 auto;
+  padding: clamp(12px, 3vw, 28px);
+  display: flex;
+  flex-direction: column;
+  gap: clamp(12px, 2vh, 18px);
+}
+
+.phone h1 {
+  margin: 0;
+  font-size: clamp(22px, 4vw, 32px);
+  line-height: 1.2;
+}
+
+.phone .lede,
+.phone .muted {
+  margin: 0;
+  color: var(--muted);
+  font-size: clamp(13px, 2.2vw, 15px);
+  line-height: 1.45;
+}
+
+.phone .card,
+.phone .banner {
+  border-radius: clamp(12px, 2vw, 16px);
+  padding: clamp(14px, 2.4vw, 20px);
+}
+
+.phone .card {
+  background: var(--card);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.phone .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.phone .row h2,
+.phone .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.phone h2 {
+  margin: 0;
+  font-size: clamp(17px, 2.6vw, 22px);
+  line-height: 1.3;
+}
+
+.phone button,
+.phone input,
+.phone .chip {
+  min-height: 3rem;
+  border-radius: 12px;
+}
+
+.phone button:focus-visible,
+.phone input:focus-visible,
+.phone .chip:focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.phone .text {
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  padding: 8px 10px;
+}
+
+.phone .primary {
+  width: 100%;
+  border: 0;
+  background: var(--primary);
+  color: var(--primary-ink);
+  font-size: clamp(16px, 2.4vw, 18px);
+  padding: 12px 16px;
+}
+
+.phone .danger {
+  border: 0;
+  background: transparent;
+  color: var(--danger);
+  padding: 8px 10px;
+}
+
+.phone .stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.phone .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.phone .field span {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.phone input[type="text"] {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  padding: 10px 12px;
+}
+
+.phone .choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.phone .choices label {
+  min-height: 3rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.phone .switch {
+  min-height: 3rem;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.phone .banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--banner);
+  color: var(--banner-ink);
+}
+
+.phone .banner strong {
+  flex: 1;
+}
+
+.phone .chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.phone .chip {
+  flex: 0 0 auto;
+  border: 1px solid var(--chip-line);
+  background: var(--chip);
+  color: var(--banner-ink);
+  padding: 8px 14px;
+}
+
+.phone .chip[aria-pressed="true"] {
+  background: var(--primary);
+  color: var(--primary-ink);
+  border-color: var(--primary);
+}
+
+.phone .section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.phone .section-head h2 {
+  font-size: clamp(16px, 2.4vw, 20px);
+}
+
+.phone .grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 8px;
+}
+
+.phone .thumb {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.phone .thumb img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 10px;
+  background: var(--line);
+}
+
+.phone .thumb button {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--danger);
+}
+
+.phone progress {
+  width: 100%;
+  height: 8px;
+}
+
+.phone .status {
+  margin: 0;
+  color: var(--banner-ink);
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+
+.phone .tv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.phone .tv-list button {
+  text-align: left;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  padding: 10px 12px;
+}
+
+.tv {
+  color-scheme: dark;
+  --bg: #0b1220;
+  --panel: #111c33;
+  --text: #f8fafc;
+  --muted: #cbd5e1;
+  --button: #1e293b;
+  --stroke: #334155;
+  --focus: #38bdf8;
+  --on: #065f46;
+  --on-ink: #ecfdf5;
+  --off: #991b1b;
+  --off-ink: #fee2e2;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.tv .stage {
+  min-height: 100vh;
+  padding: clamp(28px, 5vw, 96px) clamp(28px, 5vw, 120px);
+  display: flex;
+  flex-direction: column;
+  gap: clamp(16px, 2.5vh, 28px);
+}
+
+.tv .top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: clamp(12px, 2vw, 24px);
+}
+
+.tv h1 {
+  margin: 0;
+  flex: 1 1 12rem;
+  font-size: clamp(28px, 3.4vw, 64px);
+  line-height: 1.15;
+}
+
+.tv .badge {
+  margin: 0;
+  background: var(--on);
+  color: var(--on-ink);
+  border-radius: 999px;
+  padding: 0.45em 0.9em;
+  font-size: clamp(16px, 1.6vw, 28px);
+  line-height: 1.2;
+}
+
+.tv .badge.off {
+  background: var(--off);
+  color: var(--off-ink);
+}
+
+.tv .panel {
+  background: var(--panel);
+  border-radius: 16px;
+  padding: clamp(16px, 2vw, 32px);
+  display: flex;
+  flex-direction: column;
+  gap: 0.55em;
+}
+
+.tv .stat {
+  margin: 0;
+  font-size: clamp(16px, 1.8vw, 28px);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.tv .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: clamp(12px, 1.5vw, 20px);
+}
+
+.tv .actions button {
+  flex: 1 1 16rem;
+  max-width: 100%;
+  min-height: clamp(56px, 8vh, 72px);
+  padding: 12px 18px;
+  border-radius: 12px;
+  border: 2px solid var(--stroke);
+  background: var(--button);
+  color: var(--text);
+  font-size: clamp(16px, 1.6vw, 24px);
+}
+
+.tv .actions button:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-offset: 2px;
+  background: var(--focus);
+  color: #0b1220;
+  border-color: #ffffff;
+}
