@@ -30,6 +30,7 @@ class StreamingHttpServer(
     private val onMutation: (() -> Unit)? = null,
     private val staticRoot: File? = null,
     private val usbStatusProvider: (() -> UsbLinkStatus)? = null,
+    private val logStore: DebugLogStore? = null,
 ) : Closeable {
 
     private val running = AtomicBoolean(false)
@@ -82,21 +83,34 @@ class StreamingHttpServer(
         acceptThread = null
     }
 
+    private class RequestLogState {
+        var status: Int = 0
+        var isStatic: Boolean = false
+        var errorDetail: String? = null
+    }
+
     private fun handleClient(socket: Socket) {
         socket.use { s ->
             s.soTimeout = 30_000
             val input = BufferedInputStream(s.getInputStream(), 65_536)
             val output = s.getOutputStream()
+            val startNs = System.nanoTime()
+            val remoteIp = s.inetAddress?.hostAddress ?: "unknown"
+            val logState = RequestLogState()
+            var method = ""
+            var rawTarget = ""
+            var rawPath = ""
+            var isPoll = false
             try {
                 val requestLine = readAsciiLine(input) ?: return
                 if (requestLine.isEmpty()) return
                 val parts = requestLine.split(' ')
                 if (parts.size < 2) {
-                    writeJsonError(output, 400, "Bad Request")
+                    writeJsonError(output, 400, "Bad Request", logState)
                     return
                 }
-                val method = parts[0].uppercase()
-                val rawTarget = parts[1]
+                method = parts[0].uppercase()
+                rawTarget = parts[1]
 
                 val headers = mutableMapOf<String, String>()
                 while (true) {
@@ -116,17 +130,46 @@ class StreamingHttpServer(
                 }
 
                 val qIndex = rawTarget.indexOf('?')
-                val rawPath = if (qIndex >= 0) rawTarget.substring(0, qIndex) else rawTarget
+                rawPath = if (qIndex >= 0) rawTarget.substring(0, qIndex) else rawTarget
                 val query = if (qIndex >= 0) parseQuery(rawTarget.substring(qIndex + 1)) else emptyMap()
+                isPoll = query["poll"] == "1"
                 val segments = rawPath.split('/').filter { it.isNotEmpty() }.map { decodePathSegment(it) }
 
-                route(method, segments, query, headers, input, output)
+                route(method, segments, query, headers, input, output, logState)
             } catch (e: IllegalArgumentException) {
-                runCatching { writeJsonError(output, 400, e.message ?: "Bad Request") }
+                logState.errorDetail = e.message
+                runCatching { writeJsonError(output, 400, e.message ?: "Bad Request", logState) }
             } catch (e: Exception) {
-                runCatching { writeJsonError(output, 500, e.message ?: "Internal Server Error") }
+                logState.errorDetail = e.message
+                runCatching { writeJsonError(output, 500, e.message ?: "Internal Server Error", logState) }
+            } finally {
+                recordRequestLog(method, rawTarget, rawPath, isPoll, remoteIp, startNs, logState)
             }
         }
+    }
+
+    private fun recordRequestLog(
+        method: String,
+        rawTarget: String,
+        rawPath: String,
+        isPoll: Boolean,
+        remoteIp: String,
+        startNs: Long,
+        state: RequestLogState,
+    ) {
+        val logger = logStore ?: return
+        if (method.isEmpty() || method == "OPTIONS") return
+        if (state.isStatic || isPoll) return
+        if (rawPath == "/api/v1/logs") return
+        val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(0L)
+        val status = state.status
+        val level = when {
+            status >= 500 || status == 0 -> "ERROR"
+            status >= 400 -> "WARN"
+            else -> "INFO"
+        }
+        val errSuffix = state.errorDetail?.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
+        logger.log(level, "HTTP", "$method $rawTarget -> $status (${elapsedMs}ms) from $remoteIp$errSuffix")
     }
 
     private fun route(
@@ -136,16 +179,17 @@ class StreamingHttpServer(
         headers: Map<String, String>,
         input: BufferedInputStream,
         output: OutputStream,
+        logState: RequestLogState,
     ) {
         if (method == "OPTIONS") {
-            writeBinary(output, 204, "text/plain; charset=utf-8", ByteArray(0))
+            writeBinary(output, 204, "text/plain; charset=utf-8", ByteArray(0), logState)
             return
         }
-        if (method == "GET" && serveStatic(segments, output)) return
+        if (method == "GET" && serveStatic(segments, output, logState)) return
 
         // /api/v1/...
         if (segments.size < 3 || segments[0] != "api" || segments[1] != "v1") {
-            writeJsonError(output, 404, "Not Found")
+            writeJsonError(output, 404, "Not Found", logState)
             return
         }
 
@@ -153,60 +197,77 @@ class StreamingHttpServer(
             // GET /api/v1/info
             segments.size == 3 && segments[2] == "info" -> {
                 if (method != "GET") {
-                    writeJsonError(output, 405, "Method Not Allowed")
+                    writeJsonError(output, 405, "Method Not Allowed", logState)
                     return
                 }
                 val info = store.deviceInfo(boundPort)
-                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(info))
+                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(info), logState)
             }
 
             // GET /api/v1/usb
             segments.size == 3 && segments[2] == "usb" -> {
                 if (method != "GET") {
-                    writeJsonError(output, 405, "Method Not Allowed")
+                    writeJsonError(output, 405, "Method Not Allowed", logState)
                     return
                 }
                 val usbStatus = usbStatusProvider?.invoke() ?: UsbLinkStatus()
-                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(usbStatus))
+                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(usbStatus), logState)
+            }
+
+            // GET / DELETE /api/v1/logs
+            segments.size == 3 && segments[2] == "logs" -> {
+                when (method) {
+                    "GET" -> {
+                        val limit = query["limit"]?.toIntOrNull() ?: 200
+                        val sinceId = query["sinceId"]?.toLongOrNull() ?: 0L
+                        val logs = logStore?.entries(limit, sinceId) ?: emptyList()
+                        writeJson(output, 200, DiscoveryProtocol.json.encodeToString(logs), logState)
+                    }
+                    "DELETE" -> {
+                        val cleared = logStore?.clear() ?: 0
+                        writeJson(output, 200, DiscoveryProtocol.json.encodeToString(DeleteResult(cleared)), logState)
+                    }
+                    else -> writeJsonError(output, 405, "Method Not Allowed", logState)
+                }
             }
 
             // GET /api/v1/albums
             segments.size == 3 && segments[2] == "albums" -> {
                 if (method != "GET") {
-                    writeJsonError(output, 405, "Method Not Allowed")
+                    writeJsonError(output, 405, "Method Not Allowed", logState)
                     return
                 }
                 val albums = store.listAlbums()
-                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(albums))
+                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(albums), logState)
             }
 
             // DELETE /api/v1/albums/{album}
             segments.size == 4 && segments[2] == "albums" -> {
                 if (method != "DELETE") {
-                    writeJsonError(output, 405, "Method Not Allowed")
+                    writeJsonError(output, 405, "Method Not Allowed", logState)
                     return
                 }
                 val album = DiscoveryProtocol.sanitizeAlbumName(segments[3])
                 val deleted = store.deleteAlbum(album)
                 onMutation?.invoke()
-                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(DeleteResult(deleted)))
+                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(DeleteResult(deleted)), logState)
             }
 
             // GET /api/v1/albums/{album}/photos
             segments.size == 5 && segments[2] == "albums" && segments[4] == "photos" -> {
                 if (method != "GET") {
-                    writeJsonError(output, 405, "Method Not Allowed")
+                    writeJsonError(output, 405, "Method Not Allowed", logState)
                     return
                 }
                 val album = DiscoveryProtocol.sanitizeAlbumName(segments[3])
                 val photos = store.listPhotos(album)
-                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(photos))
+                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(photos), logState)
             }
 
             // POST /api/v1/albums/{album}/upload
             segments.size == 5 && segments[2] == "albums" && segments[4] == "upload" -> {
                 if (method != "POST") {
-                    writeJsonError(output, 405, "Method Not Allowed")
+                    writeJsonError(output, 405, "Method Not Allowed", logState)
                     return
                 }
                 val album = DiscoveryProtocol.sanitizeAlbumName(segments[3])
@@ -233,7 +294,7 @@ class StreamingHttpServer(
 
                 val bodyStream = createBodyStream(headers, input)
                 if (bodyStream == null) {
-                    writeJsonError(output, 400, "Missing Content-Length or Transfer-Encoding: chunked")
+                    writeJsonError(output, 400, "Missing Content-Length or Transfer-Encoding: chunked", logState)
                     return
                 }
                 val result = store.savePhoto(
@@ -247,39 +308,39 @@ class StreamingHttpServer(
                 // Drain any unread bytes cleanly if store returned early
                 drainQuietly(bodyStream)
                 onMutation?.invoke()
-                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(result))
+                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(result), logState)
             }
 
             // GET /api/v1/photos/{id}/thumb
             segments.size == 5 && segments[2] == "photos" && segments[4] == "thumb" -> {
                 if (method != "GET") {
-                    writeJsonError(output, 405, "Method Not Allowed")
+                    writeJsonError(output, 405, "Method Not Allowed", logState)
                     return
                 }
                 val thumb = store.readThumbnail(segments[3])
                 if (thumb == null) {
-                    writeJsonError(output, 404, "Thumbnail Not Found")
+                    writeJsonError(output, 404, "Thumbnail Not Found", logState)
                     return
                 }
-                writeBinary(output, 200, "image/jpeg", thumb)
+                writeBinary(output, 200, "image/jpeg", thumb, logState)
             }
 
             // DELETE /api/v1/photos/{id}
             segments.size == 4 && segments[2] == "photos" -> {
                 if (method != "DELETE") {
-                    writeJsonError(output, 405, "Method Not Allowed")
+                    writeJsonError(output, 405, "Method Not Allowed", logState)
                     return
                 }
                 val deleted = store.deletePhoto(segments[3])
                 if (!deleted) {
-                    writeJsonError(output, 404, "Photo Not Found")
+                    writeJsonError(output, 404, "Photo Not Found", logState)
                     return
                 }
                 onMutation?.invoke()
-                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(DeleteResult(1)))
+                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(DeleteResult(1)), logState)
             }
 
-            else -> writeJsonError(output, 404, "Not Found")
+            else -> writeJsonError(output, 404, "Not Found", logState)
         }
     }
 
@@ -302,15 +363,16 @@ class StreamingHttpServer(
         }
     }
 
-    private fun writeJsonError(output: OutputStream, status: Int, message: String) {
-        writeJson(output, status, DiscoveryProtocol.json.encodeToString(ErrorResponse(message)))
+    private fun writeJsonError(output: OutputStream, status: Int, message: String, logState: RequestLogState? = null) {
+        logState?.errorDetail = message
+        writeJson(output, status, DiscoveryProtocol.json.encodeToString(ErrorResponse(message)), logState)
     }
 
-    private fun writeJson(output: OutputStream, status: Int, jsonBody: String) {
-        writeBinary(output, status, "application/json; charset=utf-8", jsonBody.toByteArray(StandardCharsets.UTF_8))
+    private fun writeJson(output: OutputStream, status: Int, jsonBody: String, logState: RequestLogState? = null) {
+        writeBinary(output, status, "application/json; charset=utf-8", jsonBody.toByteArray(StandardCharsets.UTF_8), logState)
     }
 
-    private fun serveStatic(segments: List<String>, output: OutputStream): Boolean {
+    private fun serveStatic(segments: List<String>, output: OutputStream, logState: RequestLogState? = null): Boolean {
         val root = staticRoot ?: return false
         if (segments.any { it == "." || it == ".." || it.contains('\\') || it.contains('\u0000') }) return false
         val rel = if (segments.isEmpty()) "index.html" else segments.joinToString("/")
@@ -328,11 +390,19 @@ class StreamingHttpServer(
             "webp" -> "image/webp"
             else -> "application/octet-stream"
         }
-        writeBinary(output, 200, type, file.readBytes())
+        logState?.isStatic = true
+        writeBinary(output, 200, type, file.readBytes(), logState)
         return true
     }
 
-    private fun writeBinary(output: OutputStream, status: Int, contentType: String, body: ByteArray) {
+    private fun writeBinary(
+        output: OutputStream,
+        status: Int,
+        contentType: String,
+        body: ByteArray,
+        logState: RequestLogState? = null,
+    ) {
+        logState?.status = status
         val reason = when (status) {
             200 -> "OK"
             204 -> "No Content"

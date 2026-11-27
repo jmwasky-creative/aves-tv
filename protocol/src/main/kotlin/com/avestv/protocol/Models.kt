@@ -75,3 +75,12 @@ data class UsbLinkStatus(
     val connected: Boolean = false,
     val statusText: String = "等待手机通过 USB 接入",
 )
+
+@Serializable
+data class LogEntry(
+    val id: Long,
+    val timestampMs: Long,
+    val level: String,
+    val tag: String,
+    val message: String,
+)

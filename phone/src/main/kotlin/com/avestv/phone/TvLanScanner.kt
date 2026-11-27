@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
+import com.avestv.protocol.DebugLogStore
 import com.avestv.protocol.DiscoveryProtocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -31,6 +32,7 @@ import java.util.concurrent.ConcurrentHashMap
 class TvLanScanner(
     private val context: Context,
     private val apiClient: TvApiClient,
+    private val logStore: DebugLogStore? = null,
 ) {
     private val prefs = context.applicationContext.getSharedPreferences("avestv_phone_prefs", Context.MODE_PRIVATE)
 
@@ -66,10 +68,35 @@ class TvLanScanner(
         }
         if (host.isBlank() || port !in 1..65535) return@withContext null
 
-        val info = apiClient.probeInfo(host, port) ?: return@withContext null
-        val tv = DiscoveredTv(host, info, "手动 IP 连接")
+        val info = apiClient.probeInfo(host, port, logFailure = true) ?: return@withContext null
+        val tv = DiscoveredTv(host, info, "手动 IP 连接", port = port)
         rememberTv(tv)
+        logStore?.info("SCAN", "Manual connect succeeded: ${tv.info.deviceName} at $host:$port")
         tv
+    }
+
+    suspend fun probeUsb(usbBridgePort: Int? = null): List<DiscoveredTv> = withContext(Dispatchers.IO) {
+        val out = mutableListOf<DiscoveredTv>()
+        if (usbBridgePort != null && usbBridgePort in 1..65535) {
+            val info = apiClient.probeInfo(UsbReconnectPolicy.LOOPBACK_IP, usbBridgePort)
+            if (info != null) {
+                out.add(DiscoveredTv(UsbReconnectPolicy.LOOPBACK_IP, info, "USB 直连（AOA）", port = usbBridgePort))
+            }
+        }
+        if (usbBridgePort != DiscoveryProtocol.HTTP_DEFAULT_PORT) {
+            val info = apiClient.probeInfo(UsbReconnectPolicy.LOOPBACK_IP, DiscoveryProtocol.HTTP_DEFAULT_PORT)
+            if (info != null) {
+                out.add(
+                    DiscoveredTv(
+                        ip = UsbReconnectPolicy.LOOPBACK_IP,
+                        info = info,
+                        discoverySource = "USB 隧道直连",
+                        port = DiscoveryProtocol.HTTP_DEFAULT_PORT,
+                    ),
+                )
+            }
+        }
+        out
     }
 
     suspend fun scan(
@@ -78,12 +105,15 @@ class TvLanScanner(
         onFound: (DiscoveredTv) -> Unit,
     ): List<DiscoveredTv> = withContext(Dispatchers.IO) {
         val found = ConcurrentHashMap<String, DiscoveredTv>()
+        val localIps = collectLocalPrivateIpv4s()
+        logStore?.info("SCAN", "Start scan (force=$forceFullSubnetScan, usbPort=$usbBridgePort, phoneIps=$localIps)")
 
         fun register(tv: DiscoveredTv) {
             val prev = found[tv.info.deviceId]
             if (!LanScanPlan.shouldPreferOverExisting(prev, tv)) return
             found[tv.info.deviceId] = tv
             if (prev == null || prev.ip != tv.ip || prev.port != tv.port || prev.info.deviceName != tv.info.deviceName) {
+                logStore?.info("SCAN", "Found TV: ${tv.info.deviceName} (${tv.ip}:${tv.port}) via ${tv.discoverySource}")
                 onFound(tv)
             }
         }
@@ -93,25 +123,7 @@ class TvLanScanner(
             coroutineScope {
                 // Layer 0: Direct USB tunnel (AOA bridge or ADB reverse 127.0.0.1:53319)
                 val usbJob = launch {
-                    if (usbBridgePort != null && usbBridgePort in 1..65535) {
-                        val info = apiClient.probeInfo("127.0.0.1", usbBridgePort)
-                        if (info != null) {
-                            register(DiscoveredTv("127.0.0.1", info, "USB 直连（AOA）", port = usbBridgePort))
-                        }
-                    }
-                    if (usbBridgePort != DiscoveryProtocol.HTTP_DEFAULT_PORT) {
-                        val info = apiClient.probeInfo("127.0.0.1", DiscoveryProtocol.HTTP_DEFAULT_PORT)
-                        if (info != null) {
-                            register(
-                                DiscoveredTv(
-                                    ip = "127.0.0.1",
-                                    info = info,
-                                    discoverySource = "USB 隧道直连",
-                                    port = DiscoveryProtocol.HTTP_DEFAULT_PORT,
-                                ),
-                            )
-                        }
-                    }
+                    probeUsb(usbBridgePort).forEach { register(it) }
                 }
 
                 // Layer 1: Instant probe of previously connected TV IP
@@ -161,10 +173,12 @@ class TvLanScanner(
             }
         }
 
-        found.values.sortedWith(
+        val sorted = found.values.sortedWith(
             compareBy<DiscoveredTv> { if (it.ip == "127.0.0.1") 0 else 1 }
                 .thenBy { it.info.deviceName },
         )
+        logStore?.info("SCAN", "Scan finished: ${sorted.size} TV(s)")
+        sorted
     }
 
     private fun runUdpDiscovery(onFound: (DiscoveredTv) -> Unit) {

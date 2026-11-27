@@ -222,7 +222,22 @@ print(s.recvfrom(4096))
 EOF
 ```
 
-## 7. 已知问题记录
+## 7. 请求与运行日志
+
+双端均已内置持久化请求与调试日志（环形缓存 500 条 + 滚动落盘文件，单文件上限 512KB 自动轮转 `.1`）：
+
+| 端 | 落盘路径 | 界面查看方式 |
+|---|---|---|
+| 电脑预览 TV 端 | `protocol/build/preview-tv.log` | 电视页点击「查看日志」 |
+| 真机 TV APK | 应用私有目录 `files/logs/tv-receiver.log`（同步输出到 Logcat `AvesTV-TV`） | 电视页点击「查看日志」 |
+| 手机 APK | 应用私有目录 `files/logs/phone-sender.log`（同步输出到 Logcat `AvesTV-Phone`） | 手机页底部展开「调试日志」，可切换查看「电视端日志」或「手机端日志」，支持一键复制与清空 |
+
+TV 端 HTTP 日志接口：
+
+- `GET /api/v1/logs?limit=200&sinceId=0`：读取电视端日志列表（JSON）
+- `DELETE /api/v1/logs`：清空电视端日志
+
+## 8. 已知问题记录
 
 | 问题 | 原因 | 处理 |
 |---|---|---|

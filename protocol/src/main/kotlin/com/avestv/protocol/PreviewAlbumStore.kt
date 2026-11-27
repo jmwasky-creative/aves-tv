@@ -1,12 +1,16 @@
 package com.avestv.protocol
 
+import java.io.File
 import java.io.InputStream
+import java.nio.file.Files
 
 /**
  * In-memory album store for the desktop page preview. The TV APK keeps writing
  * through MediaStore; this store only exists so a browser can exercise the same HTTP API.
  */
-class PreviewAlbumStore : AlbumStore {
+class PreviewAlbumStore(
+    private val freeBytesProvider: () -> Long = { usableSpaceBytes(defaultStoragePath()) },
+) : AlbumStore {
     private val lock = Any()
     private val photos = LinkedHashMap<String, Pair<PhotoEntry, ByteArray>>()
     private var seq = 1
@@ -16,7 +20,7 @@ class PreviewAlbumStore : AlbumStore {
             deviceId = "preview-tv",
             deviceName = "本机预览电视",
             httpPort = httpPort,
-            freeBytes = 8L * 1024L * 1024L * 1024L,
+            freeBytes = freeBytesProvider().coerceAtLeast(0L),
             albumCount = albumsLocked().size,
             totalPhotos = photos.size,
         )
@@ -76,5 +80,19 @@ class PreviewAlbumStore : AlbumStore {
         val ids = photos.values.filter { it.first.album == album }.map { it.first.id }
         ids.forEach { photos.remove(it) }
         return ids.size
+    }
+
+    companion object {
+        fun defaultStoragePath(): File = File(System.getProperty("user.dir", ".")).absoluteFile
+
+        fun usableSpaceBytes(path: File = defaultStoragePath()): Long {
+            var target: File? = path.absoluteFile
+            while (target != null && !target.exists()) {
+                target = target.parentFile
+            }
+            val resolved = target ?: return 0L
+            val storeSpace = runCatching { Files.getFileStore(resolved.toPath()).usableSpace }.getOrNull()
+            return (storeSpace ?: resolved.usableSpace).coerceAtLeast(0L)
+        }
     }
 }

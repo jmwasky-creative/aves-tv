@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class UdpDiscoveryResponder(
     private val port: Int = DiscoveryProtocol.UDP_DISCOVERY_PORT,
+    private val logStore: DebugLogStore? = null,
     private val infoProvider: () -> TvDeviceInfo,
 ) : Closeable {
 
@@ -32,6 +33,7 @@ class UdpDiscoveryResponder(
             bind(InetSocketAddress(listenPort))
         }
         socket = ds
+        logStore?.info("UDP", "UDP discovery responder listening on $listenPort")
         thread = Thread({
             val buf = ByteArray(1024)
             while (running.get()) {
@@ -47,6 +49,7 @@ class UdpDiscoveryResponder(
                             packet.port,
                         )
                         ds.send(reply)
+                        logStore?.info("UDP", "Discovery probe from ${packet.address.hostAddress}:${packet.port} -> replied")
                     }
                 } catch (_: SocketException) {
                     break

@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.text.format.Formatter
 import android.view.View
+import android.webkit.ConsoleMessage
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.WebChromeClient
@@ -91,6 +92,16 @@ class TvMainActivity : AppCompatActivity() {
             ): Boolean {
                 showPrompt(message, defaultValue, result)
                 return true
+            }
+
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                val lvl = consoleMessage.messageLevel()
+                if (lvl == ConsoleMessage.MessageLevel.ERROR || lvl == ConsoleMessage.MessageLevel.WARNING) {
+                    val store = ReceiverForegroundService.getLogStore(this@TvMainActivity)
+                    val tag = if (lvl == ConsoleMessage.MessageLevel.ERROR) "ERROR" else "WARN"
+                    store.log(tag, "WEB", "${consoleMessage.message()} (L${consoleMessage.lineNumber()})")
+                }
+                return super.onConsoleMessage(consoleMessage)
             }
         }
         webView.addJavascriptInterface(TvBridge(), "AvesTvNative")
@@ -242,6 +253,12 @@ class TvMainActivity : AppCompatActivity() {
             done.await(2, java.util.concurrent.TimeUnit.SECONDS)
             return message
         }
+
+        @android.webkit.JavascriptInterface
+        fun logsJson(limit: Int): String = ReceiverForegroundService.logsJson(this@TvMainActivity, limit)
+
+        @android.webkit.JavascriptInterface
+        fun clearLogs(): Int = ReceiverForegroundService.clearLogs(this@TvMainActivity)
     }
 
     companion object {

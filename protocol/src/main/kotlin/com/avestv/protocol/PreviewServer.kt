@@ -15,6 +15,13 @@ fun main(args: Array<String>) {
     val web = locateWebRoot()
     val preferred = args.firstOrNull()?.toIntOrNull() ?: DiscoveryProtocol.HTTP_DEFAULT_PORT
     val store = PreviewAlbumStore()
+    val logFile = File("protocol/build/preview-tv.log")
+    val pidFile = File("protocol/build/preview-server.pid")
+    val currentPid = ProcessHandle.current().pid()
+    stopPreviousPreviewInstance(pidFile, currentPid)
+    writeOwnerPid(pidFile, currentPid)
+
+    val logStore = DebugLogStore(logFile = logFile)
     var usbWatcher: AdbUsbWatcher? = null
     val server = try {
         StreamingHttpServer(
@@ -22,6 +29,7 @@ fun main(args: Array<String>) {
             store = store,
             staticRoot = web,
             usbStatusProvider = { usbWatcher?.status ?: UsbLinkStatus() },
+            logStore = logStore,
         ).also { it.start() }
     } catch (_: Exception) {
         StreamingHttpServer(
@@ -29,17 +37,38 @@ fun main(args: Array<String>) {
             store = store,
             staticRoot = web,
             usbStatusProvider = { usbWatcher?.status ?: UsbLinkStatus() },
+            logStore = logStore,
         ).also { it.start() }
     }
     val port = server.boundPort
-    usbWatcher = AdbUsbWatcher(port).also { it.start() }
-    val udp = runCatching {
+    var udp: UdpDiscoveryResponder? = null
+    val shutdownNow = {
+        runCatching { usbWatcher?.close() }
+        runCatching { udp?.close() }
+        runCatching { server.close() }
+        if (readOwnerPid(pidFile) == currentPid) {
+            runCatching { pidFile.delete() }
+        }
+    }
+    usbWatcher = AdbUsbWatcher(
+        targetPort = port,
+        logStore = logStore,
+        isOwner = { readOwnerPid(pidFile) == currentPid },
+        onSuperseded = {
+            logStore.warn("PREVIEW", "Superseded by newer PreviewServer instance; exiting pid=$currentPid")
+            shutdownNow()
+            System.exit(0)
+        },
+    ).also { it.start() }
+    udp = runCatching {
         UdpDiscoveryResponder(
             port = DiscoveryProtocol.UDP_DISCOVERY_PORT,
+            logStore = logStore,
             infoProvider = { store.deviceInfo(port) },
         ).also { it.start() }
     }.getOrNull()
     val lanIps = detectPrivateLanIps()
+    logStore.info("PREVIEW", "Preview server started on port $port (pid=$currentPid, LAN: ${lanIps.joinToString(", ").ifEmpty { "none" }})")
     println("AvesTV preview")
     println("  phone  http://127.0.0.1:$port/phone.html")
     println("  tv     http://127.0.0.1:$port/tv.html")
@@ -48,17 +77,47 @@ fun main(args: Array<String>) {
     }
     println("  udp    ${if (udp != null) "listening on ${udp.boundPort}" else "unavailable"}")
     println("  usb    ${usbWatcher.status.statusText}")
+    println("  log    ${logFile.canonicalPath}")
     println("  web    ${web.path}")
-    Runtime.getRuntime().addShutdownHook(Thread {
-        runCatching { usbWatcher.close() }
-        runCatching { udp?.close() }
-        runCatching { server.close() }
-    })
+    Runtime.getRuntime().addShutdownHook(Thread { shutdownNow() })
     Thread.currentThread().join()
+}
+
+private fun readOwnerPid(pidFile: File): Long? = runCatching {
+    if (!pidFile.isFile) null else pidFile.readText().trim().toLongOrNull()
+}.getOrNull()
+
+private fun writeOwnerPid(pidFile: File, pid: Long) {
+    runCatching {
+        pidFile.parentFile?.mkdirs()
+        pidFile.writeText(pid.toString())
+    }
+}
+
+private fun stopPreviousPreviewInstance(pidFile: File, currentPid: Long) {
+    val oldPid = readOwnerPid(pidFile) ?: return
+    if (oldPid == currentPid) return
+    val handle = ProcessHandle.of(oldPid).orElse(null) ?: return
+    if (!handle.isAlive) return
+    val cmd = handle.info().commandLine().orElse("")
+    if (!cmd.contains("PreviewServer", ignoreCase = true) && !cmd.contains("java", ignoreCase = true)) return
+    runCatching {
+        handle.destroy()
+        val deadline = System.currentTimeMillis() + 1_500L
+        while (handle.isAlive && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50)
+        }
+        if (handle.isAlive) {
+            handle.destroyForcibly()
+        }
+    }
 }
 
 internal class AdbUsbWatcher(
     private val targetPort: Int,
+    private val logStore: DebugLogStore? = null,
+    private val isOwner: () -> Boolean = { true },
+    private val onSuperseded: (() -> Unit)? = null,
 ) : Closeable {
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
@@ -94,6 +153,11 @@ internal class AdbUsbWatcher(
     }
 
     private fun pollOnce() {
+        if (!isOwner()) {
+            running.set(false)
+            onSuperseded?.invoke()
+            return
+        }
         val adb = findAdbExecutable()
         if (adb == null) {
             status = UsbLinkStatus(false, "未找到 adb（请安装 Android SDK platform-tools）")
@@ -143,7 +207,9 @@ internal class AdbUsbWatcher(
                     ),
                 )
                 if (res != null && mappedSerials.add(serial)) {
-                    println("[USB 隧道] 已自动为手机 $model ($serial) 打通 127.0.0.1:${DiscoveryProtocol.HTTP_DEFAULT_PORT} -> $targetPort")
+                    val msg = "已自动为手机 $model ($serial) 打通 127.0.0.1:${DiscoveryProtocol.HTTP_DEFAULT_PORT} -> $targetPort"
+                    println("[USB 隧道] $msg")
+                    logStore?.info("USB", msg)
                 }
                 res != null
             }

@@ -279,10 +279,63 @@ button:disabled {
 }
 
 .phone .thumb {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+}
+
+.phone .select-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+
+.phone .grid.selecting .thumb {
+  cursor: pointer;
+}
+
+.phone .grid.selecting .thumb > button {
+  display: none;
+}
+
+.phone .thumb-check {
+  display: none;
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 2px solid #ffffff;
+  background: rgba(15, 23, 42, 0.45);
+  color: transparent;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+.phone .grid.selecting .thumb-check {
+  display: flex;
+}
+
+.phone .thumb.is-selected .thumb-check {
+  background: var(--primary);
+  color: #ffffff;
+}
+
+.phone .thumb.is-selected img {
+  outline: 3px solid var(--primary);
+  outline-offset: -3px;
+  opacity: 0.88;
 }
 
 .phone .thumb img {
@@ -421,4 +474,48 @@ button:disabled {
   background: var(--focus);
   color: #0b1220;
   border-color: #ffffff;
+}
+
+.log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.log-tabs,
+.log-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.log-box {
+  margin: 10px 0 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.06);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.tv .log-box {
+  background: rgba(2, 6, 23, 0.7);
+  font-size: clamp(12px, 1.2vw, 16px);
+}
+
+.tv .log-toolbar button {
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--stroke);
+  background: var(--button);
+  color: var(--text);
 }

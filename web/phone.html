@@ -59,10 +59,38 @@
     <section aria-label="电视相册">
       <div class="section-head">
         <h2 id="albumHeader" class="grow">电视端已有照片</h2>
+        <button id="toggleSelect" class="text" type="button" hidden>多选</button>
         <button id="clearAlbum" class="danger" type="button" hidden>清空此相册</button>
+      </div>
+      <div id="selectBar" class="select-bar" hidden>
+        <span id="selectCount" class="grow muted">已选 0 张</span>
+        <button id="selectAll" class="text" type="button">全选</button>
+        <button id="deleteSelected" class="danger" type="button" disabled>删除已选</button>
+        <button id="cancelSelect" class="text" type="button">完成</button>
       </div>
       <p id="empty" class="muted">该相册暂无照片，点上方按钮推送后电视上的 Aves 会立即显示。</p>
       <div id="grid" class="grid"></div>
+    </section>
+
+    <section class="card" aria-label="调试日志">
+      <div class="row">
+        <h2>调试日志</h2>
+        <button id="toggleLogs" class="text" type="button">展开查看</button>
+      </div>
+      <div id="logPanel" hidden>
+        <div class="log-toolbar">
+          <div class="log-tabs">
+            <button id="tabTvLogs" class="chip" type="button" aria-pressed="true">电视端日志</button>
+            <button id="tabPhoneLogs" class="chip" type="button" aria-pressed="false">手机端日志</button>
+          </div>
+          <div class="log-actions">
+            <button id="refreshLogs" class="text" type="button">刷新</button>
+            <button id="copyLogs" class="text" type="button">复制</button>
+            <button id="clearLogs" class="danger" type="button">清空</button>
+          </div>
+        </div>
+        <pre id="logView" class="log-box">暂无日志</pre>
+      </div>
     </section>
   </main>
   <script src="api.js"></script>
@@ -96,9 +124,80 @@
       var status = document.getElementById("status");
       var files = document.getElementById("files");
       var albumHeader = document.getElementById("albumHeader");
+      var toggleSelect = document.getElementById("toggleSelect");
       var clearAlbum = document.getElementById("clearAlbum");
+      var selectBar = document.getElementById("selectBar");
+      var selectCount = document.getElementById("selectCount");
+      var selectAll = document.getElementById("selectAll");
+      var deleteSelected = document.getElementById("deleteSelected");
+      var cancelSelect = document.getElementById("cancelSelect");
       var empty = document.getElementById("empty");
       var grid = document.getElementById("grid");
+      var currentPhotos = [];
+      var selectMode = false;
+      var selectedPhotoIds = {};
+      var batchDeleting = false;
+      var toggleLogs = document.getElementById("toggleLogs");
+      var logPanel = document.getElementById("logPanel");
+      var tabTvLogs = document.getElementById("tabTvLogs");
+      var tabPhoneLogs = document.getElementById("tabPhoneLogs");
+      var refreshLogs = document.getElementById("refreshLogs");
+      var copyLogs = document.getElementById("copyLogs");
+      var clearLogs = document.getElementById("clearLogs");
+      var logView = document.getElementById("logView");
+      var activeLogTab = "tv";
+      var browserLogs = [];
+
+      AvesApi.onRequestLog = function (ev) {
+        var level = (ev.status >= 500 || ev.status === 0) ? "ERROR" : (ev.status >= 400 ? "WARN" : "INFO");
+        var errPart = ev.error ? (" (" + ev.error + ")") : "";
+        var msg = ev.method + " " + ev.path + " -> " + ev.status + " (" + ev.elapsedMs + "ms)" + errPart;
+        if (native && native.logClient) {
+          native.logClient(level, "WEB-API", msg);
+        } else {
+          browserLogs.push({
+            id: browserLogs.length + 1,
+            timestampMs: Date.now(),
+            level: level,
+            tag: "WEB-API",
+            message: msg,
+          });
+          if (browserLogs.length > 200) browserLogs.shift();
+        }
+      };
+
+      function formatLogEntries(entries) {
+        if (!entries || !entries.length) return "暂无日志";
+        return entries.map(function (item) {
+          var d = new Date(item.timestampMs || Date.now());
+          function p(n) { return String(n).padStart(2, "0"); }
+          var ts = p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+          return "[" + ts + "] [" + item.level + "] [" + item.tag + "] " + item.message;
+        }).join("\n");
+      }
+
+      function loadLogs() {
+        if (logPanel.hidden) return;
+        if (activeLogTab === "tv") {
+          if (!connected) {
+            logView.textContent = "尚未连接到电视，连接后可读取电视端日志";
+            return;
+          }
+          logView.textContent = "正在读取电视端日志...";
+          AvesApi.logs(200).then(function (entries) {
+            logView.textContent = formatLogEntries(entries);
+            logView.scrollTop = logView.scrollHeight;
+          }).catch(function (err) {
+            logView.textContent = "读取电视端日志失败：" + ((err && err.message) || "网络错误");
+          });
+        } else {
+          var entries = native && native.phoneLogsJson
+            ? JSON.parse(native.phoneLogsJson(200))
+            : browserLogs;
+          logView.textContent = formatLogEntries(entries);
+          logView.scrollTop = logView.scrollHeight;
+        }
+      }
 
       function formatBytes(n) {
         if (!n || n <= 0) return "--";
@@ -160,6 +259,7 @@
         connected = false;
         selected = null;
         rescan.disabled = false;
+        exitSelectMode(false);
         connTitle.textContent = "未发现局域网内的电视";
         var ipHint = phoneIps && phoneIps.length
           ? "（手机当前局域网 IP：" + phoneIps.join(", ") + "）"
@@ -188,6 +288,8 @@
       }
 
       function selectTv(tv, refresh) {
+        var changedTv = !selected || selected.deviceId !== tv.deviceId;
+        if (changedTv) exitSelectMode(false);
         selected = tv;
         connected = true;
         AvesApi.setBase("http://" + tv.ip + ":" + tv.httpPort);
@@ -227,6 +329,7 @@
           button.textContent = album.name + " (" + album.photoCount + ")";
           button.setAttribute("aria-pressed", album.name === current ? "true" : "false");
           button.addEventListener("click", function () {
+            exitSelectMode(false);
             albumInput.value = album.name;
             renderChips(albums);
             loadPhotos();
@@ -235,28 +338,82 @@
         });
       }
 
+      function selectedIdsList() {
+        return currentPhotos.filter(function (p) { return !!selectedPhotoIds[p.id]; }).map(function (p) { return p.id; });
+      }
+
+      function updateSelectBar() {
+        var ids = selectedIdsList();
+        var count = ids.length;
+        toggleSelect.hidden = currentPhotos.length === 0 || selectMode;
+        clearAlbum.hidden = currentPhotos.length === 0 || selectMode;
+        selectBar.hidden = !selectMode || currentPhotos.length === 0;
+        selectCount.textContent = "已选 " + count + " 张";
+        selectAll.textContent = (currentPhotos.length > 0 && count === currentPhotos.length) ? "取消全选" : "全选";
+        deleteSelected.disabled = count === 0 || batchDeleting;
+        deleteSelected.textContent = count > 0 ? "删除已选 (" + count + ")" : "删除已选";
+      }
+
+      function exitSelectMode(rerender) {
+        selectMode = false;
+        selectedPhotoIds = {};
+        if (rerender) {
+          renderPhotos(currentPhotos);
+        } else {
+          grid.classList.remove("selecting");
+          updateSelectBar();
+        }
+      }
+
       function renderPhotos(photos) {
+        currentPhotos = photos || [];
+        var validIds = {};
+        currentPhotos.forEach(function (p) { validIds[p.id] = true; });
+        Object.keys(selectedPhotoIds).forEach(function (id) {
+          if (!validIds[id]) delete selectedPhotoIds[id];
+        });
+        if (currentPhotos.length === 0) {
+          selectMode = false;
+        }
         var name = albumName();
-        albumHeader.textContent = "电视相册「" + name + "」（" + photos.length + " 张）";
-        clearAlbum.hidden = photos.length === 0;
-        empty.hidden = photos.length !== 0;
+        albumHeader.textContent = "电视相册「" + name + "」（" + currentPhotos.length + " 张）";
+        empty.hidden = currentPhotos.length !== 0;
+        grid.classList.toggle("selecting", selectMode);
         grid.textContent = "";
-        photos.forEach(function (photo) {
+        currentPhotos.forEach(function (photo) {
           var card = document.createElement("article");
-          card.className = "thumb";
+          card.className = selectedPhotoIds[photo.id] ? "thumb is-selected" : "thumb";
           var img = document.createElement("img");
           img.alt = photo.name;
           img.src = AvesApi.thumbUrl(photo.id);
+          var badge = document.createElement("span");
+          badge.className = "thumb-check";
+          badge.setAttribute("aria-hidden", "true");
+          badge.textContent = "✓";
           var button = document.createElement("button");
           button.type = "button";
           button.textContent = "删除";
-          button.addEventListener("click", function () {
+          button.addEventListener("click", function (e) {
+            e.stopPropagation();
             confirmDelete(photo);
           });
+          card.addEventListener("click", function () {
+            if (!selectMode || batchDeleting) return;
+            if (selectedPhotoIds[photo.id]) {
+              delete selectedPhotoIds[photo.id];
+              card.classList.remove("is-selected");
+            } else {
+              selectedPhotoIds[photo.id] = true;
+              card.classList.add("is-selected");
+            }
+            updateSelectBar();
+          });
           card.appendChild(img);
+          card.appendChild(badge);
           card.appendChild(button);
           grid.appendChild(card);
         });
+        updateSelectBar();
       }
 
       function refreshAlbums() {
@@ -280,11 +437,17 @@
         });
       }
 
+      var photoLoadSeq = 0;
+
       function loadPhotos() {
         if (!connected) return Promise.resolve();
-        return AvesApi.photos(albumName()).then(function (photos) {
+        var seq = ++photoLoadSeq;
+        var targetAlbum = albumName();
+        return AvesApi.photos(targetAlbum).then(function (photos) {
+          if (seq !== photoLoadSeq || targetAlbum !== albumName()) return;
           renderPhotos(photos || []);
         }).catch(function () {
+          if (seq !== photoLoadSeq || targetAlbum !== albumName()) return;
           renderPhotos([]);
         });
       }
@@ -503,8 +666,57 @@
         setShared(0);
       });
       albumInput.addEventListener("change", function () {
+        exitSelectMode(false);
         renderChips([]);
         refreshAlbums();
+      });
+      toggleSelect.addEventListener("click", function () {
+        if (currentPhotos.length === 0) return;
+        selectMode = true;
+        selectedPhotoIds = {};
+        renderPhotos(currentPhotos);
+      });
+      cancelSelect.addEventListener("click", function () {
+        if (batchDeleting) return;
+        exitSelectMode(true);
+      });
+      selectAll.addEventListener("click", function () {
+        if (batchDeleting || currentPhotos.length === 0) return;
+        var allSelected = selectedIdsList().length === currentPhotos.length;
+        selectedPhotoIds = {};
+        if (!allSelected) {
+          currentPhotos.forEach(function (p) { selectedPhotoIds[p.id] = true; });
+        }
+        renderPhotos(currentPhotos);
+      });
+      deleteSelected.addEventListener("click", function () {
+        var ids = selectedIdsList();
+        if (!ids.length || batchDeleting) return;
+        var msg = "从电视删除已选的 " + ids.length + " 张照片？删除后电视上的 Aves 会同步移除，不影响手机原图。";
+        if (!window.confirm(msg)) return;
+        batchDeleting = true;
+        updateSelectBar();
+        var ok = 0;
+        var fail = 0;
+        var chain = Promise.resolve();
+        ids.forEach(function (id, idx) {
+          chain = chain.then(function () {
+            setStatus("正在删除 " + (idx + 1) + " / " + ids.length + "...");
+            return AvesApi.deletePhoto(id).then(function () {
+              ok++;
+            }).catch(function () {
+              fail++;
+            });
+          });
+        });
+        chain.then(function () {
+          batchDeleting = false;
+          exitSelectMode(false);
+          setStatus(fail === 0
+            ? "已从电视删除 " + ok + " 张照片"
+            : "删除完成：成功 " + ok + " 张，失败 " + fail + " 张");
+          refreshAlbums();
+        });
       });
       push.addEventListener("click", function () {
         if (!connected) {
@@ -539,6 +751,45 @@
         }).catch(function () {
           setStatus("清空失败，请检查电视连接");
         });
+      });
+
+      toggleLogs.addEventListener("click", function () {
+        logPanel.hidden = !logPanel.hidden;
+        toggleLogs.textContent = logPanel.hidden ? "展开查看" : "收起";
+        if (!logPanel.hidden) loadLogs();
+      });
+      tabTvLogs.addEventListener("click", function () {
+        activeLogTab = "tv";
+        tabTvLogs.setAttribute("aria-pressed", "true");
+        tabPhoneLogs.setAttribute("aria-pressed", "false");
+        loadLogs();
+      });
+      tabPhoneLogs.addEventListener("click", function () {
+        activeLogTab = "phone";
+        tabTvLogs.setAttribute("aria-pressed", "false");
+        tabPhoneLogs.setAttribute("aria-pressed", "true");
+        loadLogs();
+      });
+      refreshLogs.addEventListener("click", loadLogs);
+      copyLogs.addEventListener("click", function () {
+        var text = logView.textContent || "";
+        if (native && native.copyText) {
+          native.copyText(text);
+        } else if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            setStatus("日志已复制到剪贴板");
+          }).catch(function () {});
+        }
+      });
+      clearLogs.addEventListener("click", function () {
+        if (activeLogTab === "tv") {
+          if (!connected) return;
+          AvesApi.clearLogs().then(loadLogs).catch(function () {});
+        } else {
+          if (native && native.clearPhoneLogs) native.clearPhoneLogs();
+          else browserLogs = [];
+          loadLogs();
+        }
       });
 
       if (native) setShared(native.sharedCount());
