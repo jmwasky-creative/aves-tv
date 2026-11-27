@@ -16,9 +16,14 @@
     <section class="card" aria-label="连接">
       <div class="row">
         <h2 id="connTitle">正在自动搜索局域网电视...</h2>
+        <button id="toggleManual" class="text" type="button">手动连 IP</button>
         <button id="rescan" class="text" type="button">重新搜索</button>
       </div>
       <p id="connDetail" class="muted">无需填 IP，正在并发探测局域网内的电视相册接收器</p>
+      <div id="manualBox" class="manual-row" hidden>
+        <input id="manualIp" type="text" placeholder="输入电视 IP，如 10.0.173.176" autocomplete="off">
+        <button id="manualConnect" class="secondary" type="button">连接</button>
+      </div>
       <button id="switchTv" class="text" type="button" hidden>切换电视</button>
       <div id="tvList" class="tv-list" hidden></div>
     </section>
@@ -44,7 +49,7 @@
           <input id="optimize" type="checkbox" checked>
           <span>电视 4K 兼容优化（自动转 JPEG 并扶正方向）</span>
         </label>
-        <button id="push" class="primary" type="button" disabled>选择照片并推送到电视</button>
+        <button id="push" class="primary is-idle" type="button">选择照片并推送到电视</button>
         <progress id="progress" max="1" value="0" hidden></progress>
         <p id="status" class="status" hidden></p>
       </div>
@@ -75,6 +80,10 @@
 
       var connTitle = document.getElementById("connTitle");
       var connDetail = document.getElementById("connDetail");
+      var toggleManual = document.getElementById("toggleManual");
+      var manualBox = document.getElementById("manualBox");
+      var manualIp = document.getElementById("manualIp");
+      var manualConnect = document.getElementById("manualConnect");
       var rescan = document.getElementById("rescan");
       var switchTv = document.getElementById("switchTv");
       var tvList = document.getElementById("tvList");
@@ -132,7 +141,8 @@
       }
 
       function updatePushEnabled() {
-        push.disabled = !connected || uploading;
+        push.disabled = uploading;
+        push.classList.toggle("is-idle", !connected);
       }
 
       function showSearching() {
@@ -145,13 +155,17 @@
         updatePushEnabled();
       }
 
-      function showMissing() {
+      function showMissing(phoneIps) {
         scanning = false;
         connected = false;
         selected = null;
         rescan.disabled = false;
         connTitle.textContent = "未发现局域网内的电视";
-        connDetail.textContent = "请确认手机与电视连在同一个 Wi-Fi，且电视已安装并打开一次「电视相册接收器」";
+        var ipHint = phoneIps && phoneIps.length
+          ? "（手机当前局域网 IP：" + phoneIps.join(", ") + "）"
+          : "（未检测到手机局域网 IP，请检查 Wi-Fi）";
+        connDetail.textContent = "请确认手机与电视连在同一个 Wi-Fi，或用 USB 数据线直连电视 / 电脑，也可在下方手动输入电视 IP" + ipHint;
+        manualBox.hidden = false;
         switchTv.hidden = true;
         tvList.hidden = true;
         chips.textContent = "";
@@ -174,11 +188,11 @@
       }
 
       function selectTv(tv, refresh) {
-        var changedTv = !selected || selected.deviceId !== tv.deviceId;
         selected = tv;
         connected = true;
         AvesApi.setBase("http://" + tv.ip + ":" + tv.httpPort);
-        if (native && changedTv) native.remember(tv.deviceId);
+        if (native) native.remember(tv.deviceId);
+        manualBox.hidden = true;
         var freeText = formatBytes(tv.freeBytes);
         connTitle.textContent = "已自动连接：" + tv.deviceName;
         connDetail.textContent = tv.discoverySource + " · 相册 " + tv.albumCount + " 个 · 照片 " + tv.totalPhotos + " 张 · 剩余 " + freeText;
@@ -278,11 +292,12 @@
       function applyScan(data) {
         tvs = data.tvs || [];
         if (!tvs.length) {
-          if (data.done) showMissing();
+          if (data.done) showMissing(data.phoneIps);
           return;
         }
         scanning = !data.done;
         rescan.disabled = !data.done;
+        manualConnect.disabled = false;
         var preferred = tvs.filter(function (tv) { return tv.deviceId === data.preferredId; })[0];
         var current = selected && tvs.filter(function (tv) { return tv.deviceId === selected.deviceId; })[0];
         var pick = (!followPreferred && current) ? current : (preferred || current || tvs[0]);
@@ -295,6 +310,15 @@
       window.avesOnScan = function (raw) {
         var data = typeof raw === "string" ? JSON.parse(raw) : raw;
         applyScan(data);
+      };
+
+      window.avesOnConnectError = function (raw) {
+        var data = typeof raw === "string" ? JSON.parse(raw) : raw;
+        manualConnect.disabled = false;
+        rescan.disabled = false;
+        connTitle.textContent = "手动连接失败";
+        connDetail.textContent = (data && data.message) || "无法连接到该地址，请检查 IP 和端口";
+        manualBox.hidden = false;
       };
 
       window.avesOnShared = function (count) {
@@ -414,6 +438,57 @@
         });
       }
 
+      toggleManual.addEventListener("click", function () {
+        manualBox.hidden = !manualBox.hidden;
+        if (!manualBox.hidden) manualIp.focus();
+      });
+      function submitManualConnect() {
+        var raw = manualIp.value.trim();
+        if (!raw) {
+          connDetail.textContent = "请输入电视端显示的局域网 IP，例如 10.0.173.176";
+          manualIp.focus();
+          return;
+        }
+        manualConnect.disabled = true;
+        connTitle.textContent = "正在连接 " + raw + "...";
+        connDetail.textContent = "正在直连电视接收器，请稍候";
+        if (native) {
+          native.connectManual(raw);
+          return;
+        }
+        var cleaned = raw.replace(/^https?:\/\//i, "").split("/")[0];
+        var colon = cleaned.lastIndexOf(":");
+        var host = colon > 0 ? cleaned.slice(0, colon) : cleaned;
+        var port = colon > 0 ? Number(cleaned.slice(colon + 1) || 53319) : 53319;
+        AvesApi.setBase("http://" + host + ":" + port);
+        AvesApi.info().then(function (info) {
+          applyScan({
+            done: true,
+            preferredId: info.deviceId,
+            tvs: [{
+              deviceId: info.deviceId,
+              deviceName: info.deviceName,
+              ip: host,
+              httpPort: port,
+              discoverySource: "手动 IP 连接",
+              freeBytes: info.freeBytes || 0,
+              albumCount: info.albumCount || 0,
+              totalPhotos: info.totalPhotos || 0,
+            }],
+          });
+        }).catch(function () {
+          window.avesOnConnectError({
+            message: "无法连接到 " + raw + "，请确认电视端已运行且与手机在同一局域网",
+          });
+        });
+      }
+      manualConnect.addEventListener("click", submitManualConnect);
+      manualIp.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          submitManualConnect();
+        }
+      });
       rescan.addEventListener("click", function () {
         followPreferred = true;
         startScan(true);
@@ -433,9 +508,11 @@
       });
       push.addEventListener("click", function () {
         if (!connected) {
-          setStatus("尚未连接到电视，请先确认电视与手机在同一局域网");
+          manualBox.hidden = false;
+          setStatus("尚未连接到电视，请确认与电视在同一 Wi-Fi、使用 USB 数据线直连，或点击上方「手动连 IP」连接");
           return;
         }
+        setStatus("");
         var album = albumName();
         var replace = replaceMode();
         var optimize = optimizeOn();

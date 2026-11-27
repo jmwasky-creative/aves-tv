@@ -6,7 +6,8 @@ data class DiscoveredTv(
     val ip: String,
     val info: TvDeviceInfo,
     val discoverySource: String,
+    val port: Int = info.httpPort,
 ) {
     val baseUrl: String
-        get() = "http://$ip:${info.httpPort}"
+        get() = "http://$ip:$port"
 }

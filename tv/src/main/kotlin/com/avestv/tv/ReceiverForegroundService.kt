@@ -42,6 +42,8 @@ data class ReceiverRuntimeState(
     val freeBytes: Long = 0L,
     val lastEvent: String = "等待手机推送",
     val error: String? = null,
+    val usbConnected: Boolean = false,
+    val usbStatusText: String = "等待手机通过 USB 接入",
 )
 
 class ReceiverForegroundService : Service() {
@@ -52,6 +54,7 @@ class ReceiverForegroundService : Service() {
 
     private var httpServer: TvHttpServer? = null
     private var udpResponder: UdpDiscoveryResponder? = null
+    private var usbHostManager: UsbAoaHostManager? = null
     private var nsdManager: NsdManager? = null
     private var nsdRegistrationListener: NsdManager.RegistrationListener? = null
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -146,6 +149,27 @@ class ReceiverForegroundService : Service() {
                 udpResponder = udp
 
                 registerNsd(server.boundPort)
+
+                val usbMgr = UsbAoaHostManager(
+                    context = this@ReceiverForegroundService,
+                    targetHttpPortProvider = { server.boundPort },
+                    onStateChanged = { connected, statusText ->
+                        val prev = _state.value
+                        val event = when {
+                            connected && !prev.usbConnected -> "手机已通过 USB 直连"
+                            !connected && prev.usbConnected -> "USB 连接已断开"
+                            else -> prev.lastEvent
+                        }
+                        _state.value = prev.copy(
+                            usbConnected = connected,
+                            usbStatusText = statusText,
+                            lastEvent = event,
+                        )
+                    },
+                )
+                runCatching { usbMgr.start() }
+                usbHostManager = usbMgr
+
                 refreshState("服务已就绪，手机打开即可自动搜索连接")
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
@@ -159,6 +183,8 @@ class ReceiverForegroundService : Service() {
 
     private fun stopServers() {
         unregisterNsd()
+        runCatching { usbHostManager?.stop() }
+        usbHostManager = null
         runCatching { udpResponder?.close() }
         udpResponder = null
         runCatching { httpServer?.close() }

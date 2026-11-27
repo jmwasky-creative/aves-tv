@@ -115,4 +115,32 @@ class PhonePureLogicTest {
         assertEquals(candidates.size, candidates.toSet().size)
         assertTrue(candidates.all { DiscoveryProtocol.isPrivateLanIpv4(it) })
     }
+
+    @Test
+    fun usbInterfacesAndLoopbackBridgeTakePriority() {
+        val prioritized = LanScanPlan.prioritizeInterfaces(
+            listOf(
+                "wlan0" to "192.168.1.50",
+                "rndis0" to "192.168.42.10",
+                "eth0" to "10.0.0.12",
+                "usb0" to "192.168.42.10",
+            ),
+        )
+        assertEquals(listOf("192.168.42.10", "192.168.1.50", "10.0.0.12"), prioritized)
+
+        val dummyInfo = com.avestv.protocol.TvDeviceInfo(
+            deviceId = "tv-1",
+            deviceName = "客厅电视",
+            httpPort = 53319,
+            freeBytes = 1000L,
+            albumCount = 0,
+            totalPhotos = 0,
+        )
+        val usbTv = DiscoveredTv("127.0.0.1", dummyInfo, "USB 直连（AOA）", port = 45678)
+        val lanTv = DiscoveredTv("192.168.1.20", dummyInfo, "局域网广播发现")
+        assertEquals("http://127.0.0.1:45678", usbTv.baseUrl)
+        assertEquals("http://192.168.1.20:53319", lanTv.baseUrl)
+        assertFalse(LanScanPlan.shouldPreferOverExisting(usbTv, lanTv))
+        assertTrue(LanScanPlan.shouldPreferOverExisting(lanTv, usbTv))
+    }
 }

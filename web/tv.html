@@ -16,6 +16,7 @@
       <p id="deviceName" class="stat">电视名称：客厅电视</p>
       <p id="stats" class="stat">已收相册：0 个 · 照片：0 张 · 可用空间：--</p>
       <p id="network" class="stat">局域网地址（手机自动搜，无需手动填）：正在读取</p>
+      <p id="usbStatus" class="stat">USB 直连：等待手机通过 USB 接入</p>
       <p id="event" class="stat">最新动态：等待手机推送</p>
     </section>
     <div class="actions">
@@ -30,6 +31,7 @@
       var native = typeof AvesTvNative !== "undefined" ? AvesTvNative : null;
       var previewEvent = localStorage.getItem("avestv.lastEvent") || "等待手机推送";
       var seen = null;
+      var seenUsb = null;
       var holdEvent = "";
       var deviceNameEl = document.getElementById("deviceName");
       var currentName = "客厅电视";
@@ -64,6 +66,8 @@
           "已收相册：" + (state.albumCount || 0) + " 个 · 照片：" + (state.totalPhotos || 0) + " 张 · 可用空间：" + freeLabel;
         document.getElementById("network").textContent =
           "局域网地址（手机自动搜，无需手动填）：" + (state.ipText || "未检测到局域网连接（请确认电视已连 Wi-Fi 或网线）");
+        document.getElementById("usbStatus").textContent =
+          "USB 直连：" + (state.usbStatusText || "电脑预览模式（支持 adb reverse 隧道）");
         document.getElementById("event").textContent = "最新动态：" + (holdEvent || state.lastEvent || "等待手机推送");
         document.getElementById("autoStart").textContent = state.autoStart ? "开机自启：已开启" : "开机自启：已关闭";
       }
@@ -75,12 +79,21 @@
         }
         var storedName = localStorage.getItem("avestv.deviceName");
         var auto = localStorage.getItem("avestv.autoStart") !== "0";
-        AvesApi.info().then(function (info) {
+        Promise.all([
+          AvesApi.info(),
+          AvesApi.request("GET", "/api/v1/usb").catch(function () { return null; }),
+        ]).then(function (results) {
+          var info = results[0];
+          var usb = results[1];
           if (seen && (seen.albumCount !== info.albumCount || seen.totalPhotos !== info.totalPhotos)) {
             previewEvent = "刚收到手机相册更新 (" + stamp() + ")";
             localStorage.setItem("avestv.lastEvent", previewEvent);
+          } else if (usb && seenUsb !== null && seenUsb !== !!usb.connected) {
+            previewEvent = usb.connected ? "手机已通过 USB 接入 (" + stamp() + ")" : "USB 连接已断开 (" + stamp() + ")";
+            localStorage.setItem("avestv.lastEvent", previewEvent);
           }
           seen = { albumCount: info.albumCount, totalPhotos: info.totalPhotos };
+          if (usb) seenUsb = !!usb.connected;
           var host = location.host || ("127.0.0.1:" + (info.httpPort || 53319));
           render({
             running: true,
@@ -90,6 +103,7 @@
             totalPhotos: info.totalPhotos,
             freeLabel: formatBytes(info.freeBytes),
             ipText: host,
+            usbStatusText: usb && usb.statusText,
             lastEvent: previewEvent,
             autoStart: auto,
           });

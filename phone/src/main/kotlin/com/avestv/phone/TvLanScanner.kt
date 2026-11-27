@@ -35,24 +35,55 @@ class TvLanScanner(
     private val prefs = context.applicationContext.getSharedPreferences("avestv_phone_prefs", Context.MODE_PRIVATE)
 
     fun rememberTv(tv: DiscoveredTv) {
-        prefs.edit()
-            .putString(KEY_LAST_IP, tv.ip)
-            .putInt(KEY_LAST_PORT, tv.info.httpPort)
-            .putString(KEY_LAST_ID, tv.info.deviceId)
-            .apply()
+        val editor = prefs.edit().putString(KEY_LAST_ID, tv.info.deviceId)
+        if (tv.ip != "127.0.0.1") {
+            editor
+                .putString(KEY_LAST_IP, tv.ip)
+                .putInt(KEY_LAST_PORT, tv.port)
+        }
+        editor.apply()
     }
 
     fun lastConnectedDeviceId(): String? = prefs.getString(KEY_LAST_ID, null)
 
+    fun localLanIps(): List<String> = collectLocalPrivateIpv4s()
+
+    suspend fun connectByIp(rawInput: String): DiscoveredTv? = withContext(Dispatchers.IO) {
+        val cleaned = rawInput.trim()
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .substringBefore('/')
+            .trim()
+        if (cleaned.isEmpty()) return@withContext null
+
+        val colon = cleaned.lastIndexOf(':')
+        val (host, port) = if (colon > 0 && colon < cleaned.length - 1) {
+            val h = cleaned.substring(0, colon).trim()
+            val p = cleaned.substring(colon + 1).trim().toIntOrNull() ?: return@withContext null
+            h to p
+        } else {
+            cleaned to DiscoveryProtocol.HTTP_DEFAULT_PORT
+        }
+        if (host.isBlank() || port !in 1..65535) return@withContext null
+
+        val info = apiClient.probeInfo(host, port) ?: return@withContext null
+        val tv = DiscoveredTv(host, info, "手动 IP 连接")
+        rememberTv(tv)
+        tv
+    }
+
     suspend fun scan(
         forceFullSubnetScan: Boolean = false,
+        usbBridgePort: Int? = null,
         onFound: (DiscoveredTv) -> Unit,
     ): List<DiscoveredTv> = withContext(Dispatchers.IO) {
         val found = ConcurrentHashMap<String, DiscoveredTv>()
 
         fun register(tv: DiscoveredTv) {
-            val prev = found.put(tv.info.deviceId, tv)
-            if (prev == null || prev.ip != tv.ip || prev.info.deviceName != tv.info.deviceName) {
+            val prev = found[tv.info.deviceId]
+            if (!LanScanPlan.shouldPreferOverExisting(prev, tv)) return
+            found[tv.info.deviceId] = tv
+            if (prev == null || prev.ip != tv.ip || prev.port != tv.port || prev.info.deviceName != tv.info.deviceName) {
                 onFound(tv)
             }
         }
@@ -60,6 +91,29 @@ class TvLanScanner(
         val multicastLock = acquireMulticastLock()
         try {
             coroutineScope {
+                // Layer 0: Direct USB tunnel (AOA bridge or ADB reverse 127.0.0.1:53319)
+                val usbJob = launch {
+                    if (usbBridgePort != null && usbBridgePort in 1..65535) {
+                        val info = apiClient.probeInfo("127.0.0.1", usbBridgePort)
+                        if (info != null) {
+                            register(DiscoveredTv("127.0.0.1", info, "USB 直连（AOA）", port = usbBridgePort))
+                        }
+                    }
+                    if (usbBridgePort != DiscoveryProtocol.HTTP_DEFAULT_PORT) {
+                        val info = apiClient.probeInfo("127.0.0.1", DiscoveryProtocol.HTTP_DEFAULT_PORT)
+                        if (info != null) {
+                            register(
+                                DiscoveredTv(
+                                    ip = "127.0.0.1",
+                                    info = info,
+                                    discoverySource = "USB 隧道直连",
+                                    port = DiscoveryProtocol.HTTP_DEFAULT_PORT,
+                                ),
+                            )
+                        }
+                    }
+                }
+
                 // Layer 1: Instant probe of previously connected TV IP
                 val cachedJob = launch {
                     val lastIp = prefs.getString(KEY_LAST_IP, null)
@@ -95,6 +149,7 @@ class TvLanScanner(
                     }
                 }
 
+                usbJob.join()
                 cachedJob.join()
                 udpJob.join()
                 nsdJob.join()
@@ -106,7 +161,10 @@ class TvLanScanner(
             }
         }
 
-        found.values.sortedBy { it.info.deviceName }
+        found.values.sortedWith(
+            compareBy<DiscoveredTv> { if (it.ip == "127.0.0.1") 0 else 1 }
+                .thenBy { it.info.deviceName },
+        )
     }
 
     private fun runUdpDiscovery(onFound: (DiscoveredTv) -> Unit) {
@@ -218,18 +276,18 @@ class TvLanScanner(
     }
 
     private fun collectLocalPrivateIpv4s(): List<String> = runCatching {
-        val out = mutableListOf<String>()
+        val pairs = mutableListOf<Pair<String, String>>()
         val ifaces = NetworkInterface.getNetworkInterfaces() ?: return emptyList()
         for (iface in ifaces.toList()) {
             if (!iface.isUp || iface.isLoopback) continue
             for (addr in iface.inetAddresses.toList()) {
                 val ip = (addr as? Inet4Address)?.hostAddress ?: continue
                 if (!addr.isLoopbackAddress && DiscoveryProtocol.isPrivateLanIpv4(ip)) {
-                    out.add(ip)
+                    pairs.add(iface.name to ip)
                 }
             }
         }
-        out.distinct()
+        LanScanPlan.prioritizeInterfaces(pairs)
     }.getOrDefault(emptyList())
 
     private fun collectBroadcastAddresses(): List<InetAddress> {

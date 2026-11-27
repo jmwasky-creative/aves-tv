@@ -212,6 +212,8 @@ class TvMainActivity : AppCompatActivity() {
                 put("ipText", ipText)
                 put("lastEvent", state.lastEvent)
                 put("autoStart", prefs.autoStartEnabled)
+                put("usbConnected", state.usbConnected)
+                put("usbStatusText", state.usbStatusText)
             }.toString()
         }
 

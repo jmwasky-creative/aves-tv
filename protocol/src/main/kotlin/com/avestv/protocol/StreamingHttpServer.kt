@@ -29,6 +29,7 @@ class StreamingHttpServer(
     private val store: AlbumStore,
     private val onMutation: (() -> Unit)? = null,
     private val staticRoot: File? = null,
+    private val usbStatusProvider: (() -> UsbLinkStatus)? = null,
 ) : Closeable {
 
     private val running = AtomicBoolean(false)
@@ -157,6 +158,16 @@ class StreamingHttpServer(
                 }
                 val info = store.deviceInfo(boundPort)
                 writeJson(output, 200, DiscoveryProtocol.json.encodeToString(info))
+            }
+
+            // GET /api/v1/usb
+            segments.size == 3 && segments[2] == "usb" -> {
+                if (method != "GET") {
+                    writeJsonError(output, 405, "Method Not Allowed")
+                    return
+                }
+                val usbStatus = usbStatusProvider?.invoke() ?: UsbLinkStatus()
+                writeJson(output, 200, DiscoveryProtocol.json.encodeToString(usbStatus))
             }
 
             // GET /api/v1/albums

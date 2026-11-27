@@ -69,3 +69,9 @@ data class DiscoveryProbeResponse(
         protocolVersion = protocolVersion,
     )
 }
+
+@Serializable
+data class UsbLinkStatus(
+    val connected: Boolean = false,
+    val statusText: String = "等待手机通过 USB 接入",
+)

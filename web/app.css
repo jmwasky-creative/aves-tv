@@ -148,6 +148,34 @@ button:disabled {
   padding: 12px 16px;
 }
 
+.phone .primary.is-idle {
+  opacity: 0.55;
+}
+
+.phone .secondary {
+  border: 1px solid var(--primary);
+  background: transparent;
+  color: var(--primary);
+  padding: 8px 14px;
+  white-space: nowrap;
+}
+
+.phone .manual-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: center;
+}
+
+.phone .manual-row input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  padding: 10px 12px;
+}
+
 .phone .danger {
   border: 0;
   background: transparent;

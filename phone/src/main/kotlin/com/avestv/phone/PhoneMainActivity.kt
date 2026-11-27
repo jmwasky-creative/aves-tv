@@ -1,10 +1,15 @@
 package com.avestv.phone
 
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.WebChromeClient
@@ -18,6 +23,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.avestv.protocol.DiscoveryProtocol
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +39,7 @@ class PhoneMainActivity : AppCompatActivity() {
     private val apiClient = TvApiClient()
     private lateinit var scanner: TvLanScanner
     private lateinit var transcoder: ImageTranscoder
+    private lateinit var usbAccessoryManager: UsbAoaAccessoryManager
     private lateinit var webView: WebView
 
     private val discoveredTvs = LinkedHashMap<String, DiscoveredTv>()
@@ -46,10 +53,55 @@ class PhoneMainActivity : AppCompatActivity() {
     private var pendingReplace = false
     private var pendingOptimize = true
     private var pendingFromShare = false
+    private var lastUsbConnected: Boolean? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val usbStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != ACTION_USB_STATE) return
+            val connected = intent.getBooleanExtra("connected", false)
+            val configured = intent.getBooleanExtra("configured", false)
+            val prev = lastUsbConnected
+            lastUsbConnected = connected
+            if (uploading) return
+            if (connected && (prev == false || (configured && selectedTv == null))) {
+                usbAccessoryManager.checkConnectedAccessories()
+                startAutoDiscovery(forceFullSubnetScan = false)
+                mainHandler.postDelayed({
+                    if (!isDestroyed && !uploading && selectedTv == null) {
+                        usbAccessoryManager.checkConnectedAccessories()
+                        startAutoDiscovery(forceFullSubnetScan = false)
+                    }
+                }, 2_500L)
+            } else if (!connected && prev == true && selectedTv?.ip == "127.0.0.1") {
+                startAutoDiscovery(forceFullSubnetScan = false)
+            }
+        }
+    }
 
     private val pickMediaLauncher = registerForActivityResult(
-        ActivityResultContracts.PickMultipleVisualMedia(100)
+        ActivityResultContracts.PickMultipleVisualMedia()
     ) { uris ->
+        if (uris.isNotEmpty()) {
+            uploadUris(uris, pendingAlbum, pendingReplace, pendingOptimize, pendingFromShare)
+        }
+    }
+
+    private val fallbackPickLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != RESULT_OK) return@registerForActivityResult
+        val data = result.data ?: return@registerForActivityResult
+        val uris = buildList {
+            val clip = data.clipData
+            if (clip != null) {
+                for (i in 0 until clip.itemCount) {
+                    clip.getItemAt(i)?.uri?.let { add(it) }
+                }
+            } else {
+                data.data?.let { add(it) }
+            }
+        }
         if (uris.isNotEmpty()) {
             uploadUris(uris, pendingAlbum, pendingReplace, pendingOptimize, pendingFromShare)
         }
@@ -60,6 +112,13 @@ class PhoneMainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         scanner = TvLanScanner(this, apiClient)
         transcoder = ImageTranscoder(this)
+        usbAccessoryManager = UsbAoaAccessoryManager(this) {
+            runOnUiThread {
+                if (!uploading) {
+                    startAutoDiscovery(forceFullSubnetScan = false)
+                }
+            }
+        }
         webView = WebView(this)
         setContentView(webView)
         val settings = webView.settings
@@ -79,18 +138,38 @@ class PhoneMainActivity : AppCompatActivity() {
         webView.webChromeClient = dialogChromeClient()
         webView.addJavascriptInterface(PhoneBridge(), "AvesTvNative")
         handleIncomingShareIntent(intent)
+        usbAccessoryManager.start()
+        usbAccessoryManager.handleIntent(intent)
+        ContextCompat.registerReceiver(
+            this,
+            usbStateReceiver,
+            IntentFilter(ACTION_USB_STATE),
+            ContextCompat.RECEIVER_EXPORTED,
+        )
         webView.loadUrl(ASSET_PAGE)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        usbAccessoryManager.checkConnectedAccessories()
+        if (!uploading && selectedTv == null) {
+            startAutoDiscovery(forceFullSubnetScan = false)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIncomingShareIntent(intent)
+        usbAccessoryManager.handleIntent(intent)
         emitShared()
     }
 
     override fun onDestroy() {
         scanJob?.cancel()
+        mainHandler.removeCallbacksAndMessages(null)
+        runCatching { unregisterReceiver(usbStateReceiver) }
+        usbAccessoryManager.stop()
         webView.removeJavascriptInterface("AvesTvNative")
         webView.destroy()
         super.onDestroy()
@@ -196,7 +275,10 @@ class PhoneMainActivity : AppCompatActivity() {
         synchronized(tvsLock) { discoveredTvs.clear() }
         val preferredId = selectedTv?.info?.deviceId ?: scanner.lastConnectedDeviceId().orEmpty()
         scanJob = lifecycleScope.launch {
-            val all = scanner.scan(forceFullSubnetScan = forceFullSubnetScan) { tv ->
+            val all = scanner.scan(
+                forceFullSubnetScan = forceFullSubnetScan,
+                usbBridgePort = usbAccessoryManager.activeBridgePort,
+            ) { tv ->
                 runOnUiThread {
                     synchronized(tvsLock) { discoveredTvs[tv.info.deviceId] = tv }
                     publishScan(done = false, preferredId = preferredId)
@@ -211,12 +293,15 @@ class PhoneMainActivity : AppCompatActivity() {
     private fun publishScan(done: Boolean, preferredId: String) {
         val arr = JSONArray()
         val snapshot = synchronized(tvsLock) { discoveredTvs.values.toList() }
+        if (selectedTv == null && snapshot.isNotEmpty()) {
+            selectedTv = snapshot.firstOrNull { it.info.deviceId == preferredId } ?: snapshot.first()
+        }
         snapshot.forEach { tv ->
             arr.put(JSONObject().apply {
                 put("deviceId", tv.info.deviceId)
                 put("deviceName", tv.info.deviceName)
                 put("ip", tv.ip)
-                put("httpPort", tv.info.httpPort)
+                put("httpPort", tv.port)
                 put("discoverySource", tv.discoverySource)
                 put("freeBytes", tv.info.freeBytes)
                 put("albumCount", tv.info.albumCount)
@@ -227,8 +312,41 @@ class PhoneMainActivity : AppCompatActivity() {
             put("tvs", arr)
             put("done", done)
             put("preferredId", preferredId)
+            put("phoneIps", JSONArray(scanner.localLanIps()))
         }
         emit("avesOnScan", payload.toString())
+    }
+
+    private fun launchPhotoPicker() {
+        val launchedPicker = runCatching {
+            pickMediaLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+            )
+            true
+        }.getOrDefault(false)
+        if (launchedPicker) return
+
+        val launchedDocument = runCatching {
+            val openDoc = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            }
+            fallbackPickLauncher.launch(openDoc)
+            true
+        }.getOrDefault(false)
+        if (launchedDocument) return
+
+        runCatching {
+            val getContent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            }
+            fallbackPickLauncher.launch(Intent.createChooser(getContent, "选择照片"))
+        }.onFailure {
+            Toast.makeText(this, "无法打开系统相册选择器", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun uploadUris(
@@ -331,20 +449,44 @@ class PhoneMainActivity : AppCompatActivity() {
         }
 
         @android.webkit.JavascriptInterface
+        fun connectManual(rawAddress: String) {
+            runOnUiThread {
+                if (uploading) return@runOnUiThread
+                scanJob?.cancel()
+                lifecycleScope.launch {
+                    val tv = scanner.connectByIp(rawAddress)
+                    if (tv != null) {
+                        synchronized(tvsLock) { discoveredTvs[tv.info.deviceId] = tv }
+                        selectedTv = tv
+                        publishScan(done = true, preferredId = tv.info.deviceId)
+                    } else {
+                        val payload = JSONObject().apply {
+                            put("message", "无法连接到 ${rawAddress.trim()}，请确认电视端已运行且与手机在同一局域网")
+                        }
+                        emit("avesOnConnectError", payload.toString())
+                    }
+                }
+            }
+        }
+
+        @android.webkit.JavascriptInterface
         fun pickAndUpload(album: String, replace: Boolean, optimize: Boolean) {
             runOnUiThread {
                 if (uploading) return@runOnUiThread
                 if (selectedTv == null) {
-                    Toast.makeText(this@PhoneMainActivity, "尚未连接到电视，请先确认电视与手机在同一局域网", Toast.LENGTH_SHORT).show()
+                    selectedTv = synchronized(tvsLock) { discoveredTvs.values.firstOrNull() }
+                }
+                if (selectedTv == null) {
+                    val msg = "尚未连接到电视，请先确认电视与手机在同一局域网"
+                    Toast.makeText(this@PhoneMainActivity, msg, Toast.LENGTH_SHORT).show()
+                    emitUpload("done", 0, 0, msg, false)
                     return@runOnUiThread
                 }
                 pendingAlbum = album
                 pendingReplace = replace
                 pendingOptimize = optimize
                 pendingFromShare = false
-                pickMediaLauncher.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                )
+                launchPhotoPicker()
             }
         }
 
@@ -362,5 +504,6 @@ class PhoneMainActivity : AppCompatActivity() {
 
     companion object {
         private const val ASSET_PAGE = "http://appassets.androidplatform.net/assets/phone.html"
+        private const val ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE"
     }
 }

@@ -13,19 +13,22 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okio.BufferedSink
 import java.io.IOException
+import java.net.Proxy
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 class TvApiClient {
 
     private val probeClient = OkHttpClient.Builder()
-        .connectTimeout(350, TimeUnit.MILLISECONDS)
-        .readTimeout(450, TimeUnit.MILLISECONDS)
-        .writeTimeout(450, TimeUnit.MILLISECONDS)
+        .proxy(Proxy.NO_PROXY)
+        .connectTimeout(800, TimeUnit.MILLISECONDS)
+        .readTimeout(1000, TimeUnit.MILLISECONDS)
+        .writeTimeout(1000, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(false)
         .build()
 
     private val transferClient = OkHttpClient.Builder()
+        .proxy(Proxy.NO_PROXY)
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
