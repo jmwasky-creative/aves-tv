@@ -20,7 +20,8 @@ git clone https://github.com/jmwasky-creative/aves-tv /Users/a1/workplace/agy/av
 | `web/` | 手机页 `phone.html`、电视页 `tv.html`，共用 `app.css`、`api.js`；APK 内的 WebView 与电脑浏览器用同一套文件 |
 | `tv/` | Android TV 接收端 APK（`com.avestv.tv`） |
 | `phone/` | Android 手机发送端 APK（`com.avestv.phone`） |
-| `dist/` | 仓库自带的已签名 Release 安装包 |
+| `scripts/` | 电脑端 USB 联调脚本（`run-usb-preview.sh`） |
+| Release 安装包 | 统一发布在 [GitHub Releases](https://github.com/jmwasky-creative/aves-tv/releases) |
 
 ### 关键源码
 
