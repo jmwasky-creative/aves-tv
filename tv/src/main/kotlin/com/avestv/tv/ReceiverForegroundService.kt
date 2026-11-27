@@ -13,11 +13,14 @@ import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import com.avestv.protocol.DebugLogStore
 import com.avestv.protocol.DiscoveryProtocol
 import com.avestv.protocol.UdpDiscoveryResponder
+import com.avestv.protocol.UsbLinkStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.io.File
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.text.SimpleDateFormat
@@ -51,6 +55,7 @@ class ReceiverForegroundService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var prefs: TvPreferences
     private lateinit var repository: MediaStoreAlbumRepository
+    private lateinit var logStore: DebugLogStore
 
     private var httpServer: TvHttpServer? = null
     private var udpResponder: UdpDiscoveryResponder? = null
@@ -64,6 +69,7 @@ class ReceiverForegroundService : Service() {
         super.onCreate()
         prefs = TvPreferences(this)
         repository = MediaStoreAlbumRepository(this, prefs)
+        logStore = getLogStore(this)
         ensureNotificationChannel()
     }
 
@@ -134,18 +140,26 @@ class ReceiverForegroundService : Service() {
                     onMutation = {
                         serviceScope.launch {
                             val now = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                            logStore.info("ALBUM", "Album mutated by phone ($now)")
                             refreshState("刚收到手机相册更新 ($now)")
                         }
                     },
+                    usbStatusProvider = {
+                        val s = _state.value
+                        UsbLinkStatus(s.usbConnected, s.usbStatusText)
+                    },
+                    logStore = logStore,
                 )
                 server.start()
                 httpServer = server
+                logStore.info("TV", "TvHttpServer started on port ${server.boundPort}")
 
                 val udp = UdpDiscoveryResponder(
                     port = DiscoveryProtocol.UDP_DISCOVERY_PORT,
                     infoProvider = { repository.deviceInfo(server.boundPort) },
+                    logStore = logStore,
                 )
-                runCatching { udp.start() }
+                runCatching { udp.start() }.onFailure { logStore.error("UDP", "UDP responder failed", it) }
                 udpResponder = udp
 
                 registerNsd(server.boundPort)
@@ -153,6 +167,7 @@ class ReceiverForegroundService : Service() {
                 val usbMgr = UsbAoaHostManager(
                     context = this@ReceiverForegroundService,
                     targetHttpPortProvider = { server.boundPort },
+                    logStore = logStore,
                     onStateChanged = { connected, statusText ->
                         val prev = _state.value
                         val event = when {
@@ -167,11 +182,12 @@ class ReceiverForegroundService : Service() {
                         )
                     },
                 )
-                runCatching { usbMgr.start() }
+                runCatching { usbMgr.start() }.onFailure { logStore.error("USB", "USB host manager failed", it) }
                 usbHostManager = usbMgr
 
                 refreshState("服务已就绪，手机打开即可自动搜索连接")
             } catch (e: Exception) {
+                logStore.error("TV", "ReceiverForegroundService startup failed", e)
                 _state.value = _state.value.copy(
                     running = false,
                     error = "启动失败：${e.message}",
@@ -317,6 +333,32 @@ class ReceiverForegroundService : Service() {
 
         private val _state = MutableStateFlow(ReceiverRuntimeState())
         val state: StateFlow<ReceiverRuntimeState> = _state.asStateFlow()
+
+        private val logStoreLock = Any()
+        @Volatile
+        private var sharedLogStore: DebugLogStore? = null
+
+        fun getLogStore(context: Context): DebugLogStore {
+            sharedLogStore?.let { return it }
+            return synchronized(logStoreLock) {
+                sharedLogStore ?: DebugLogStore(
+                    logFile = File(context.applicationContext.filesDir, "logs/tv-receiver.log"),
+                    onLog = { entry ->
+                        val text = "[${entry.tag}] ${entry.message}"
+                        when (entry.level) {
+                            "ERROR" -> Log.e("AvesTV-TV", text)
+                            "WARN" -> Log.w("AvesTV-TV", text)
+                            else -> Log.i("AvesTV-TV", text)
+                        }
+                    },
+                ).also { sharedLogStore = it }
+            }
+        }
+
+        fun logsJson(context: Context, limit: Int = 200): String =
+            getLogStore(context).entriesJson(limit)
+
+        fun clearLogs(context: Context): Int = getLogStore(context).clear()
 
         fun start(context: Context) {
             val intent = Intent(context, ReceiverForegroundService::class.java).apply {

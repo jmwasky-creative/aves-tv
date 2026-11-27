@@ -2,14 +2,15 @@ package com.avestv.phone
 
 import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
+import android.webkit.ConsoleMessage
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.WebChromeClient
@@ -25,18 +26,24 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.avestv.protocol.DebugLogStore
 import com.avestv.protocol.DiscoveryProtocol
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.encodeToString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 
 class PhoneMainActivity : AppCompatActivity() {
 
-    private val apiClient = TvApiClient()
+    private lateinit var logStore: DebugLogStore
+    private lateinit var apiClient: TvApiClient
     private lateinit var scanner: TvLanScanner
     private lateinit var transcoder: ImageTranscoder
     private lateinit var usbAccessoryManager: UsbAoaAccessoryManager
@@ -54,7 +61,7 @@ class PhoneMainActivity : AppCompatActivity() {
     private var pendingOptimize = true
     private var pendingFromShare = false
     private var lastUsbConnected: Boolean? = null
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private var usbReconnectJob: Job? = null
 
     private val usbStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -63,18 +70,30 @@ class PhoneMainActivity : AppCompatActivity() {
             val configured = intent.getBooleanExtra("configured", false)
             val prev = lastUsbConnected
             lastUsbConnected = connected
-            if (uploading) return
-            if (connected && (prev == false || (configured && selectedTv == null))) {
-                usbAccessoryManager.checkConnectedAccessories()
-                startAutoDiscovery(forceFullSubnetScan = false)
-                mainHandler.postDelayed({
-                    if (!isDestroyed && !uploading && selectedTv == null) {
-                        usbAccessoryManager.checkConnectedAccessories()
-                        startAutoDiscovery(forceFullSubnetScan = false)
+            val action = UsbReconnectPolicy.actionForUsbState(
+                previousConnected = prev,
+                connected = connected,
+                configured = configured,
+                isRetrying = usbReconnectJob?.isActive == true,
+            )
+            when (action) {
+                UsbReconnectPolicy.UsbStateAction.HANDLE_DISCONNECT -> {
+                    cancelUsbReconnect()
+                    if (!uploading) {
+                        handleUsbDisconnected()
                     }
-                }, 2_500L)
-            } else if (!connected && prev == true && selectedTv?.ip == "127.0.0.1") {
-                startAutoDiscovery(forceFullSubnetScan = false)
+                }
+                UsbReconnectPolicy.UsbStateAction.START_RECONNECT -> {
+                    if (!uploading) {
+                        startUsbReconnect()
+                    }
+                }
+                UsbReconnectPolicy.UsbStateAction.CHECK_ACCESSORIES_ONLY -> {
+                    if (!uploading) {
+                        usbAccessoryManager.checkConnectedAccessories()
+                    }
+                }
+                UsbReconnectPolicy.UsbStateAction.NONE -> Unit
             }
         }
     }
@@ -110,12 +129,21 @@ class PhoneMainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        scanner = TvLanScanner(this, apiClient)
+        logStore = PhoneLogHolder.get(this)
+        apiClient = TvApiClient(logStore)
+        scanner = TvLanScanner(this, apiClient, logStore)
         transcoder = ImageTranscoder(this)
-        usbAccessoryManager = UsbAoaAccessoryManager(this) {
+        usbAccessoryManager = UsbAoaAccessoryManager(this, logStore) { localPort ->
             runOnUiThread {
-                if (!uploading) {
-                    startAutoDiscovery(forceFullSubnetScan = false)
+                if (localPort != null) {
+                    if (!uploading) {
+                        startUsbReconnect()
+                    }
+                } else {
+                    cancelUsbReconnect()
+                    if (!uploading) {
+                        handleUsbDisconnected()
+                    }
                 }
             }
         }
@@ -152,8 +180,14 @@ class PhoneMainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         usbAccessoryManager.checkConnectedAccessories()
-        if (!uploading && selectedTv == null) {
-            startAutoDiscovery(forceFullSubnetScan = false)
+        if (!uploading) {
+            val shouldReconnectUsb = UsbReconnectPolicy.isLoopbackTv(selectedTv) ||
+                (selectedTv == null && (lastUsbConnected == true || usbAccessoryManager.activeBridgePort != null))
+            if (shouldReconnectUsb) {
+                startUsbReconnect()
+            } else if (selectedTv == null) {
+                startAutoDiscovery(forceFullSubnetScan = false)
+            }
         }
     }
 
@@ -167,7 +201,7 @@ class PhoneMainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         scanJob?.cancel()
-        mainHandler.removeCallbacksAndMessages(null)
+        cancelUsbReconnect()
         runCatching { unregisterReceiver(usbStateReceiver) }
         usbAccessoryManager.stop()
         webView.removeJavascriptInterface("AvesTvNative")
@@ -216,6 +250,15 @@ class PhoneMainActivity : AppCompatActivity() {
         ): Boolean {
             result.cancel()
             return true
+        }
+
+        override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+            val lvl = consoleMessage.messageLevel()
+            if (lvl == ConsoleMessage.MessageLevel.ERROR || lvl == ConsoleMessage.MessageLevel.WARNING) {
+                val levelStr = if (lvl == ConsoleMessage.MessageLevel.ERROR) "ERROR" else "WARN"
+                logStore.log(levelStr, "WEB", "${consoleMessage.message()} (L${consoleMessage.lineNumber()})")
+            }
+            return super.onConsoleMessage(consoleMessage)
         }
     }
 
@@ -270,32 +313,142 @@ class PhoneMainActivity : AppCompatActivity() {
 
     private fun sharedSize(): Int = synchronized(shareLock) { pendingSharedUris.size }
 
+    private fun cancelUsbReconnect() {
+        usbReconnectJob?.cancel()
+        usbReconnectJob = null
+    }
+
+    private fun handleUsbDisconnected() {
+        val result = synchronized(tvsLock) {
+            val cleared = UsbReconnectPolicy.clearLoopbackOnDisconnect(
+                discovered = discoveredTvs.values.toList(),
+                selected = selectedTv,
+            )
+            if (cleared.clearedLoopback) {
+                discoveredTvs.clear()
+                for (tv in cleared.remainingTvs) {
+                    discoveredTvs[tv.info.deviceId] = tv
+                }
+            }
+            cleared
+        }
+        selectedTv = result.selectedTv
+        if (result.clearedLoopback) {
+            val preferredId = result.selectedTv?.info?.deviceId ?: scanner.lastConnectedDeviceId().orEmpty()
+            publishScan(done = true, preferredId = preferredId)
+            startAutoDiscovery(forceFullSubnetScan = false)
+        }
+    }
+
+    private fun startUsbReconnect() {
+        cancelUsbReconnect()
+        val job = lifecycleScope.launch(start = CoroutineStart.LAZY) {
+            val currentJob = coroutineContext[Job]
+            try {
+                for (attempt in 0 until UsbReconnectPolicy.MAX_RETRY_ATTEMPTS) {
+                    if (uploading || !isActive) break
+                    usbAccessoryManager.checkConnectedAccessories()
+                    val usbTvs = scanner.probeUsb(usbAccessoryManager.activeBridgePort)
+                    if (usbTvs.isNotEmpty()) {
+                        scanJob?.cancel()
+                        synchronized(tvsLock) {
+                            val merged = UsbReconnectPolicy.mergeDiscovered(discoveredTvs, usbTvs)
+                            discoveredTvs.clear()
+                            discoveredTvs.putAll(merged)
+                        }
+                        publishScan(done = true, preferredId = usbTvs.first().info.deviceId)
+                        selectedTv?.let { scanner.rememberTv(it) }
+                        break
+                    }
+
+                    if (UsbReconnectPolicy.isStaleLoopbackSelection(selectedTv, usbTvs)) {
+                        val cleared = synchronized(tvsLock) {
+                            val res = UsbReconnectPolicy.clearLoopbackOnDisconnect(
+                                discovered = discoveredTvs.values.toList(),
+                                selected = selectedTv,
+                            )
+                            discoveredTvs.clear()
+                            for (tv in res.remainingTvs) {
+                                discoveredTvs[tv.info.deviceId] = tv
+                            }
+                            res
+                        }
+                        selectedTv = cleared.selectedTv
+                        publishScan(
+                            done = true,
+                            preferredId = cleared.selectedTv?.info?.deviceId ?: scanner.lastConnectedDeviceId().orEmpty(),
+                        )
+                    }
+
+                    if (attempt == 0 && selectedTv == null && scanJob?.isActive != true) {
+                        startAutoDiscovery(forceFullSubnetScan = false)
+                    }
+
+                    val hasNext = UsbReconnectPolicy.shouldScheduleNextRetry(
+                        nextAttempt = attempt + 1,
+                        foundUsbTvs = usbTvs,
+                        usbPhysicallyConnected = lastUsbConnected == true,
+                        hasAoaBridge = usbAccessoryManager.activeBridgePort != null,
+                        selectedTv = selectedTv,
+                    )
+                    if (!hasNext) break
+                    delay(UsbReconnectPolicy.RETRY_INTERVAL_MS)
+                }
+            } finally {
+                if (usbReconnectJob == currentJob) {
+                    usbReconnectJob = null
+                }
+            }
+        }
+        usbReconnectJob = job
+        job.start()
+    }
+
     private fun startAutoDiscovery(forceFullSubnetScan: Boolean) {
         scanJob?.cancel()
         synchronized(tvsLock) { discoveredTvs.clear() }
         val preferredId = selectedTv?.info?.deviceId ?: scanner.lastConnectedDeviceId().orEmpty()
-        scanJob = lifecycleScope.launch {
+        val job = lifecycleScope.launch(start = CoroutineStart.LAZY) {
+            val currentJob = coroutineContext[Job]
             val all = scanner.scan(
                 forceFullSubnetScan = forceFullSubnetScan,
                 usbBridgePort = usbAccessoryManager.activeBridgePort,
             ) { tv ->
                 runOnUiThread {
-                    synchronized(tvsLock) { discoveredTvs[tv.info.deviceId] = tv }
+                    if (scanJob != currentJob) return@runOnUiThread
+                    synchronized(tvsLock) {
+                        val merged = UsbReconnectPolicy.mergeDiscovered(discoveredTvs, listOf(tv))
+                        discoveredTvs.clear()
+                        discoveredTvs.putAll(merged)
+                    }
+                    if (UsbReconnectPolicy.isLoopbackTv(tv)) {
+                        cancelUsbReconnect()
+                    }
                     publishScan(done = false, preferredId = preferredId)
                 }
             }
-            all.forEach { tv -> synchronized(tvsLock) { discoveredTvs[tv.info.deviceId] = tv } }
+            if (scanJob != currentJob) return@launch
+            synchronized(tvsLock) {
+                val merged = UsbReconnectPolicy.mergeDiscovered(discoveredTvs, all)
+                discoveredTvs.clear()
+                discoveredTvs.putAll(merged)
+            }
+            if (all.any { UsbReconnectPolicy.isLoopbackTv(it) }) {
+                cancelUsbReconnect()
+            }
             if (all.isEmpty()) selectedTv = null
             publishScan(done = true, preferredId = preferredId)
         }
+        scanJob = job
+        job.start()
     }
 
     private fun publishScan(done: Boolean, preferredId: String) {
         val arr = JSONArray()
         val snapshot = synchronized(tvsLock) { discoveredTvs.values.toList() }
-        if (selectedTv == null && snapshot.isNotEmpty()) {
-            selectedTv = snapshot.firstOrNull { it.info.deviceId == preferredId } ?: snapshot.first()
-        }
+        val resolved = UsbReconnectPolicy.resolveSelection(snapshot, selectedTv, preferredId)
+        selectedTv = resolved
+        val effectivePreferredId = resolved?.info?.deviceId ?: preferredId
         snapshot.forEach { tv ->
             arr.put(JSONObject().apply {
                 put("deviceId", tv.info.deviceId)
@@ -311,7 +464,7 @@ class PhoneMainActivity : AppCompatActivity() {
         val payload = JSONObject().apply {
             put("tvs", arr)
             put("done", done)
-            put("preferredId", preferredId)
+            put("preferredId", effectivePreferredId)
             put("phoneIps", JSONArray(scanner.localLanIps()))
         }
         emit("avesOnScan", payload.toString())
@@ -453,6 +606,7 @@ class PhoneMainActivity : AppCompatActivity() {
             runOnUiThread {
                 if (uploading) return@runOnUiThread
                 scanJob?.cancel()
+                cancelUsbReconnect()
                 lifecycleScope.launch {
                     val tv = scanner.connectByIp(rawAddress)
                     if (tv != null) {
@@ -498,6 +652,27 @@ class PhoneMainActivity : AppCompatActivity() {
                 emitShared()
                 if (batch.isEmpty()) return@runOnUiThread
                 uploadUris(batch, album, replace, optimize, fromShare = true)
+            }
+        }
+
+        @android.webkit.JavascriptInterface
+        fun phoneLogsJson(limit: Int): String =
+            DiscoveryProtocol.json.encodeToString(logStore.entries(limit))
+
+        @android.webkit.JavascriptInterface
+        fun clearPhoneLogs(): Int = logStore.clear()
+
+        @android.webkit.JavascriptInterface
+        fun logClient(level: String, tag: String, message: String) {
+            logStore.log(level, tag, message)
+        }
+
+        @android.webkit.JavascriptInterface
+        fun copyText(text: String) {
+            runOnUiThread {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                cm?.setPrimaryClip(ClipData.newPlainText("AvesTV 日志", text))
+                Toast.makeText(this@PhoneMainActivity, "日志已复制到剪贴板", Toast.LENGTH_SHORT).show()
             }
         }
     }

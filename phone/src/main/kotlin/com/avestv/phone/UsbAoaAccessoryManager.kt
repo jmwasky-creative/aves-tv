@@ -10,6 +10,7 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.content.ContextCompat
+import com.avestv.protocol.DebugLogStore
 import com.avestv.protocol.UsbAoaProtocol
 import com.avestv.protocol.UsbTunnelClientBridge
 import java.io.FileInputStream
@@ -25,6 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class UsbAoaAccessoryManager(
     context: Context,
+    private val logStore: DebugLogStore? = null,
     private val onBridgeStateChanged: (localPort: Int?) -> Unit,
 ) {
     private val appContext = context.applicationContext
@@ -135,6 +137,7 @@ class UsbAoaAccessoryManager(
             permissionRequestedFor = null
         }
         bridge.start()
+        logStore?.info("USB", "AOA accessory bridge started on 127.0.0.1:${bridge.localPort}")
         onBridgeStateChanged(bridge.localPort)
     }
 
@@ -145,6 +148,7 @@ class UsbAoaAccessoryManager(
             closeLocked()
         }
         if (hadBridge) {
+            logStore?.info("USB", "AOA accessory bridge disconnected")
             onBridgeStateChanged(null)
         }
     }

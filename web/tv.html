@@ -23,7 +23,15 @@
       <button id="openAves" type="button">打开原版 Aves 播放</button>
       <button id="rename" type="button">修改电视名称</button>
       <button id="autoStart" type="button">开机自启：已开启</button>
+      <button id="toggleLogs" type="button">查看日志</button>
     </div>
+    <section id="logPanel" class="panel" hidden>
+      <div class="log-toolbar">
+        <strong>电视端日志</strong>
+        <button id="clearLogs" type="button">清空日志</button>
+      </div>
+      <pre id="logView" class="log-box">暂无日志</pre>
+    </section>
   </main>
   <script src="api.js"></script>
   <script>
@@ -72,16 +80,44 @@
         document.getElementById("autoStart").textContent = state.autoStart ? "开机自启：已开启" : "开机自启：已关闭";
       }
 
+      var logPanel = document.getElementById("logPanel");
+      var logView = document.getElementById("logView");
+      var toggleLogsBtn = document.getElementById("toggleLogs");
+
+      function formatLogEntries(entries) {
+        if (!entries || !entries.length) return "暂无日志";
+        return entries.map(function (item) {
+          var d = new Date(item.timestampMs || Date.now());
+          function p(n) { return String(n).padStart(2, "0"); }
+          var ts = p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+          return "[" + ts + "] [" + item.level + "] [" + item.tag + "] " + item.message;
+        }).join("\n");
+      }
+
+      function refreshLogs() {
+        if (logPanel.hidden) return;
+        if (native && native.logsJson) {
+          logView.textContent = formatLogEntries(JSON.parse(native.logsJson(100)));
+          logView.scrollTop = logView.scrollHeight;
+          return;
+        }
+        AvesApi.logs(100).then(function (entries) {
+          logView.textContent = formatLogEntries(entries);
+          logView.scrollTop = logView.scrollHeight;
+        }).catch(function () {});
+      }
+
       function refresh() {
         if (native) {
           render(JSON.parse(native.runtimeJson()));
+          refreshLogs();
           return;
         }
         var storedName = localStorage.getItem("avestv.deviceName");
         var auto = localStorage.getItem("avestv.autoStart") !== "0";
         Promise.all([
-          AvesApi.info(),
-          AvesApi.request("GET", "/api/v1/usb").catch(function () { return null; }),
+          AvesApi.request("GET", "/api/v1/info?poll=1"),
+          AvesApi.request("GET", "/api/v1/usb?poll=1").catch(function () { return null; }),
         ]).then(function (results) {
           var info = results[0];
           var usb = results[1];
@@ -107,6 +143,7 @@
             lastEvent: previewEvent,
             autoStart: auto,
           });
+          refreshLogs();
         }).catch(function () {
           render({
             running: false,
@@ -153,6 +190,21 @@
           localStorage.setItem("avestv.autoStart", on ? "0" : "1");
         }
         refresh();
+      });
+
+      toggleLogsBtn.addEventListener("click", function () {
+        logPanel.hidden = !logPanel.hidden;
+        toggleLogsBtn.textContent = logPanel.hidden ? "查看日志" : "收起日志";
+        if (!logPanel.hidden) refreshLogs();
+      });
+
+      document.getElementById("clearLogs").addEventListener("click", function () {
+        if (native && native.clearLogs) {
+          native.clearLogs();
+          refreshLogs();
+        } else {
+          AvesApi.clearLogs().then(refreshLogs).catch(function () {});
+        }
       });
 
       window.avesFocus = function () {

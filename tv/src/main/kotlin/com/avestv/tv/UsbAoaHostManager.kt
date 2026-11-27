@@ -13,6 +13,7 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
 import androidx.core.content.ContextCompat
+import com.avestv.protocol.DebugLogStore
 import com.avestv.protocol.UsbAoaProtocol
 import com.avestv.protocol.UsbTunnelHostBridge
 import java.io.IOException
@@ -31,6 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class UsbAoaHostManager(
     context: Context,
     private val targetHttpPortProvider: () -> Int,
+    private val logStore: DebugLogStore? = null,
     private val onStateChanged: (connected: Boolean, statusText: String) -> Unit,
 ) {
     private val appContext = context.applicationContext
@@ -56,12 +58,16 @@ class UsbAoaHostManager(
                     if (device != null) {
                         synchronized(lock) { permissionRequestedIds.remove(device.deviceId) }
                         if (granted) {
+                            logStore?.info("USB", "USB host permission granted for ${device.deviceName}")
                             dispatchInspect(device)
+                        } else {
+                            logStore?.warn("USB", "USB host permission denied for ${device.deviceName}")
                         }
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                     if (device != null) {
+                        logStore?.info("USB", "USB device attached: ${device.deviceName} (vid=${device.vendorId}, pid=${device.productId})")
                         dispatchInspect(device)
                     }
                 }
@@ -69,6 +75,7 @@ class UsbAoaHostManager(
                     if (device != null) {
                         synchronized(lock) { permissionRequestedIds.remove(device.deviceId) }
                         if (synchronized(lock) { activeDeviceId == device.deviceId }) {
+                            logStore?.info("USB", "USB device detached: ${device.deviceName}")
                             closeSession("等待手机通过 USB 接入")
                         }
                     }
@@ -213,7 +220,10 @@ class UsbAoaHostManager(
                 1_500,
             )
             if (startedRes >= 0) {
+                logStore?.info("USB", "AOA handshake sent (proto=$protocol), waiting for phone re-enumeration")
                 onStateChanged(false, "正在建立 USB 直连...")
+            } else {
+                logStore?.warn("USB", "AOA CMD_START failed ($startedRes)")
             }
         } finally {
             runCatching { conn.close() }
@@ -286,6 +296,7 @@ class UsbAoaHostManager(
         }
 
         bridge.start()
+        logStore?.info("USB", "AOA host bridge started for ${device.deviceName} -> 127.0.0.1:${targetHttpPortProvider()}")
         onStateChanged(true, "已通过 USB 直连手机")
     }
 
